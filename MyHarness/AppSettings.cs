@@ -1,0 +1,53 @@
+using System.Text.Json;
+
+namespace MyHarnessWin;
+
+/// <summary>
+/// Tiny persistent user settings (currently only the last working folder),
+/// stored in %LocalAppData%\Test05-Win\settings.json. All I/O is best-effort:
+/// a missing or broken settings file simply falls back to the folder picker.
+/// </summary>
+internal static class AppSettings
+{
+    private static readonly string FilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Test05-Win",
+        "settings.json");
+
+    private sealed record Model(string LastWorkingFolder = "");
+
+    /// <summary>Returns the last used working folder, or null when none was saved.</summary>
+    public static string? LoadLastWorkingFolder()
+    {
+        try
+        {
+            if (File.Exists(FilePath))
+            {
+                var model = JsonSerializer.Deserialize<Model>(File.ReadAllText(FilePath));
+                if (!string.IsNullOrWhiteSpace(model?.LastWorkingFolder))
+                {
+                    return model.LastWorkingFolder;
+                }
+            }
+        }
+        catch
+        {
+            // Corrupt settings are not fatal — the folder picker takes over.
+        }
+
+        return null;
+    }
+
+    public static void SaveLastWorkingFolder(string folder)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(new Model(folder)));
+        }
+        catch
+        {
+            // Saving is best-effort; the next launch just shows the picker again.
+        }
+    }
+}
