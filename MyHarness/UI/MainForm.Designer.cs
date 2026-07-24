@@ -28,6 +28,7 @@ partial class MainForm
     private void InitializeComponent()
     {
         components = new System.ComponentModel.Container();
+        System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(MainForm));
         menu = new MenuStrip();
         folderMenuItem = new ToolStripMenuItem();
         modelMenu = new ToolStripMenuItem();
@@ -76,23 +77,23 @@ partial class MainForm
         // 
         folderMenuItem.ForeColor = Color.FromArgb(232, 237, 242);
         folderMenuItem.Name = "folderMenuItem";
-        folderMenuItem.Size = new Size(98, 19);
-        folderMenuItem.Text = "📁 New Project";
+        folderMenuItem.Size = new Size(96, 19);
+        folderMenuItem.Text = "NEW PROJECT";
         // 
         // modelMenu
         // 
         modelMenu.ForeColor = Color.FromArgb(232, 237, 242);
         modelMenu.Name = "modelMenu";
-        modelMenu.Size = new Size(62, 19);
-        modelMenu.Text = "Модель";
+        modelMenu.Size = new Size(68, 19);
+        modelMenu.Text = "МОДЕЛЬ";
         // 
         // modeMenu
         // 
         modeMenu.DropDownItems.AddRange(new ToolStripItem[] { modeExecuteItem, modePlanItem, modeAutoPermItem });
         modeMenu.ForeColor = Color.FromArgb(232, 237, 242);
         modeMenu.Name = "modeMenu";
-        modeMenu.Size = new Size(57, 19);
-        modeMenu.Text = "Режим";
+        modeMenu.Size = new Size(63, 19);
+        modeMenu.Text = "РЕЖИМ";
         // 
         // modeExecuteItem
         // 
@@ -262,21 +263,19 @@ partial class MainForm
         // 
         folderLabel.ForeColor = Color.FromArgb(133, 147, 165);
         folderLabel.Name = "folderLabel";
-        folderLabel.Size = new Size(19, 17);
-        folderLabel.Text = "—";
+        folderLabel.Size = new Size(0, 17);
         // 
         // toolStripStatusLabel1
         // 
-        toolStripStatusLabel1.AutoSize = false;
         toolStripStatusLabel1.Name = "toolStripStatusLabel1";
-        toolStripStatusLabel1.Size = new Size(118, 17);
+        toolStripStatusLabel1.Size = new Size(16, 17);
         toolStripStatusLabel1.Text = "   ";
         // 
         // usageLabel
         // 
         usageLabel.ForeColor = Color.FromArgb(133, 147, 165);
         usageLabel.Name = "usageLabel";
-        usageLabel.Size = new Size(836, 17);
+        usageLabel.Size = new Size(957, 17);
         usageLabel.Spring = true;
         usageLabel.TextAlign = ContentAlignment.MiddleLeft;
         // 
@@ -300,11 +299,12 @@ partial class MainForm
         Controls.Add(menu);
         Font = new Font("Segoe UI", 9.5F);
         ForeColor = Color.FromArgb(232, 237, 242);
+        Icon = (Icon)resources.GetObject("$this.Icon");
         MainMenuStrip = menu;
         MinimumSize = new Size(720, 440);
         Name = "MainForm";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "Test05-Win";
+        Text = "MyHarness";
         menu.ResumeLayout(false);
         menu.PerformLayout();
         sidebar.ResumeLayout(false);

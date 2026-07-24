@@ -4,7 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
-    <RootNamespace>Test05_Win</RootNamespace>
+    <RootNamespace>MyHarness</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <!-- Harness providers and samples use experimental APIs. -->
@@ -14,6 +14,7 @@
     <MSBuildWarningsAsMessages>MSB3277</MSBuildWarningsAsMessages>
     <!-- Allows building the Windows-targeted project on non-Windows build agents. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationIcon>images\avg.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,6 +54,9 @@
   <!-- secret.json holds the Ollama Cloud API key; gitignored, copied to output when present. -->
   <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\secret.json')">
     <Content Include="secret.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="images\avg.ico" />
   </ItemGroup>
 
 </Project>

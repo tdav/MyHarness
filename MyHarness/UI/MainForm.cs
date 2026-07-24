@@ -283,7 +283,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Test05-Win — ошибка запуска агента", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, ex.Message, "Ошибка запуска агента", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return null;
         }
         finally
@@ -461,7 +461,7 @@ public sealed partial class MainForm : Form
             case UsageContent usage:
                 this.usageLabel.Text = usage.Details is not null
                     ? FormatUsage(usage.Details)
-                    : "📊 Tokens —";
+                    : "📊 TOKENS —";
                 break;
 
             case TextReasoningContent reasoning when !string.IsNullOrEmpty(reasoning.Text):
@@ -554,7 +554,7 @@ public sealed partial class MainForm : Form
         var custom = new ToolStripMenuItem("Ввести имя модели…") { ForeColor = Theme.TextPrimary };
         custom.Click += async (_, _) =>
         {
-            string? name = PromptText(this, "Модель", "Имя модели Ollama:", this.active?.Host.ModelName ?? string.Empty);
+            string? name = PromptText(this, "МОДЕЛЬ", "Имя модели Ollama:", this.active?.Host.ModelName ?? string.Empty);
             if (name is not null)
             {
                 await this.ApplyModelAsync(name);
@@ -575,7 +575,7 @@ public sealed partial class MainForm : Form
     /// <summary>Shows the current model in the menu title and checks it in the dropdown.</summary>
     private void UpdateModelMenu(string modelName)
     {
-        this.modelMenu.Text = $"Модель: {modelName}";
+        this.modelMenu.Text = $"МОДЕЛЬ: {modelName}";
         foreach (ToolStripItem item in this.modelMenu.DropDownItems)
         {
             if (item is ToolStripMenuItem menuItem && menuItem.Tag is string name)
@@ -630,8 +630,7 @@ public sealed partial class MainForm : Form
 
                 this.modeProvider = host.Agent.GetService<AgentModeProvider>();
             }
-
-            this.Text = $"Test05-Win — {modelName} — {entry.Folder}";
+            
             this.UpdateModelMenu(modelName);
             this.AppendLine(
                 $"Модель переключена: {modelName} (контекстное окно: {host.ContextWindowTokens:N0} токенов; " +
@@ -673,7 +672,7 @@ public sealed partial class MainForm : Form
     /// <summary>Shows the current mode in the menu title and checks it in the dropdown.</summary>
     private void UpdateModeMenu(string mode)
     {
-        this.modeMenu.Text = $"Режим: {mode}";
+        this.modeMenu.Text = $"РЕЖИМ: {mode}";
         foreach (ToolStripItem item in this.modeMenu.DropDownItems)
         {
             if (item is ToolStripMenuItem menuItem && menuItem.Tag is string name)
@@ -796,7 +795,7 @@ public sealed partial class MainForm : Form
         int contextWindow = this.active?.Host.ContextWindowTokens ?? AgentHost.DefaultContextWindowTokens;
         int outputBudget = this.active?.Host.OutputTokens ?? AgentHost.MaxOutputTokens;
         int inputBudget = contextWindow - outputBudget;
-        return $"📊 Tokens — input: {FormatTokenCount(details.InputTokenCount, inputBudget)}"
+        return $"📊 TOKENS — input: {FormatTokenCount(details.InputTokenCount, inputBudget)}"
             + $" | output: {FormatTokenCount(details.OutputTokenCount, outputBudget)}"
             + $" | total: {FormatTokenCount(details.TotalTokenCount, contextWindow)}";
     }
@@ -890,7 +889,7 @@ public sealed partial class MainForm : Form
 
         public List<MarkdownViewer.Segment> Transcript { get; set; } = [];
 
-        public string UsageText { get; set; } = "📊 Tokens —";
+        public string UsageText { get; set; } = "📊 TOKENS —";
 
         public bool AtLineStart { get; set; } = true;
     }
