@@ -9,6 +9,7 @@ using Serilog;
 using OpenTelemetry.Trace;
 using System.ComponentModel;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MyHarnessWin.Plugins;
@@ -41,6 +42,12 @@ public sealed class AgentHost : IAsyncDisposable
     private readonly string instructions;
     private readonly AIFunction searchFilesTool;
     private readonly PluginManager pluginManager;
+    private volatile bool pluginToolsDirty;
+
+    // Per-plugin persistent agent sessions for the AskAgentAsync channel; the semaphore
+    // serializes plugin-originated turns (they arrive from background threads).
+    private readonly Dictionary<string, (AIAgent Agent, AgentSession Session)> pluginSessions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim pluginSessionsLock = new(1, 1);
 
     /// <summary>
     /// Gets the configured harness agent. The instance is replaced when a model switch
@@ -89,7 +96,105 @@ public sealed class AgentHost : IAsyncDisposable
         this.shellExecutor = shellExecutor;
         this.http = http;
         this.ollama = ollama;
+        this.pluginManager.PluginsChanged += () => this.pluginToolsDirty = true;
         this.Agent = this.BuildAgent();
+    }
+
+    /// <summary>Gets the plugin manager (the UI subscribes to its PluginLog event).</summary>
+    public PluginManager Plugins => this.pluginManager;
+
+    /// <summary>
+    /// Gets a value indicating whether a plugin was hot-loaded and the agent must be
+    /// rebuilt to expose its tools (see <see cref="RefreshPluginToolsIfNeeded"/>).
+    /// </summary>
+    public bool HasPendingPluginTools => this.pluginToolsDirty;
+
+    /// <summary>
+    /// Rebuilds the agent when a plugin was hot-loaded since the last build, making the
+    /// plugin's tools available. Returns <see langword="true"/> when the agent was
+    /// replaced — the caller must then migrate its sessions (serialize with the old agent,
+    /// deserialize with the new one), same as after <see cref="SetModelAsync"/>.
+    /// </summary>
+    public bool RefreshPluginToolsIfNeeded()
+    {
+        if (!this.pluginToolsDirty)
+        {
+            return false;
+        }
+
+        this.pluginToolsDirty = false;
+        this.Agent = this.BuildAgent();
+        return true;
+    }
+
+    /// <summary>
+    /// Runs a plugin-originated user request through the harness agent and returns its final
+    /// text answer (the IPluginContext.AskAgentAsync channel). Each plugin keeps its own
+    /// persistent session, migrated automatically when the agent instance is rebuilt.
+    /// Tool-approval requests are auto-approved: the request comes from an external channel
+    /// (e.g. a Telegram chat) where the WinForms approval dialog cannot be shown.
+    /// </summary>
+    public async Task<string> RunPluginRequestAsync(string pluginName, string message, CancellationToken cancellationToken)
+    {
+        await this.pluginSessionsLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var agent = this.Agent;
+            AgentSession session;
+            if (this.pluginSessions.TryGetValue(pluginName, out var entry))
+            {
+                session = entry.Session;
+                if (!ReferenceEquals(entry.Agent, agent))
+                {
+                    // The agent was rebuilt (model switch / plugin load) — re-attach the session.
+                    var snapshot = await entry.Agent.SerializeSessionAsync(session).ConfigureAwait(false);
+                    session = await agent.DeserializeSessionAsync(snapshot).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                session = await agent.CreateSessionAsync().ConfigureAwait(false);
+            }
+
+            var answer = new StringBuilder();
+            IList<ChatMessage>? next = [new ChatMessage(ChatRole.User, message)];
+            while (next is not null)
+            {
+                var approvals = new List<ToolApprovalRequestContent>();
+                answer.Clear(); // Only the text produced after the last approval round is the answer.
+                await foreach (var update in agent.RunStreamingAsync(next, session, cancellationToken: cancellationToken).ConfigureAwait(false))
+                {
+                    foreach (var content in update.Contents)
+                    {
+                        switch (content)
+                        {
+                            case ToolApprovalRequestContent approval:
+                                approvals.Add(approval);
+                                break;
+
+                            case TextContent text when !string.IsNullOrEmpty(text.Text):
+                                answer.Append(text.Text);
+                                break;
+                        }
+                    }
+                }
+
+                next = approvals.Count > 0
+                    ? approvals
+                        .Select(a => new ChatMessage(
+                            ChatRole.User,
+                            [a.CreateResponse(approved: true, reason: "Plugin channel: auto-approved")]))
+                        .ToList()
+                    : null;
+            }
+
+            this.pluginSessions[pluginName] = (agent, session);
+            return answer.ToString();
+        }
+        finally
+        {
+            this.pluginSessionsLock.Release();
+        }
     }
 
     /// <summary>
@@ -226,10 +331,9 @@ public sealed class AgentHost : IAsyncDisposable
 
         var tracerProvider = HarnessTracing.CreateFileTracerProvider(TracingSourceName);
 
-        // Plugins live next to the exe (like skills/ and agents/); resident plugins are
-        // compiled and started here so their tools can be handed to the agent below.
+        // Plugins live next to the exe (like skills/ and agents/); they are loaded after the
+        // host exists so the AskAgentAsync channel works from the very first plugin start.
         var pluginManager = new PluginManager(Path.Combine(baseDir, "plugins"));
-        pluginManager.LoadResidentPlugins();
 
         var codeAct = new HyperlightCodeActProvider(
             HyperlightCodeActProviderOptions.CreateForWasm(PythonGuestModule.GetModulePath()));
@@ -306,21 +410,29 @@ public sealed class AgentHost : IAsyncDisposable
     - Плагины — это C#-код, который приложение само компилирует и выполняет (Roslyn, без csproj).
       Каждый плагин живёт в своей папке: {Path.Combine(baseDir, "plugins")}\<имя>\plugin.cs
     - Два типа плагинов:
-      1. Одноразовый (`IOneShotPlugin`) — метод `RunAsync` выполняется по требованию через `plugin_run` и завершается.
+      1. Одноразовый (`IOneShotPlugin`) — становится инструментом агента (AIFunction): метод
+         `Delegate CreateHandler(IPluginContext)` возвращает делегат, чьи параметры (с атрибутами
+         `[Description]`) образуют схему параметров инструмента; имя инструмента = `Name` плагина.
       2. Резидентный (`IResidentPlugin`) — загружается вместе с приложением: `StartAsync` работает всё время
          (например, backend Telegram-бота), `GetTools()` отдаёт инструменты плагина агенту.
-    - Инструменты: `plugin_create(name, sourceCode)` — создать/обновить и скомпилировать плагин;
-      `plugin_run(name)` — выполнить одноразовый плагин; `plugin_list()` — список плагинов.
+    - Инструменты: `plugin_create(name, sourceCode)` — создать/обновить, скомпилировать и сразу загрузить
+      плагин; `plugin_load(name)` — загрузить плагин из существующей папки без перезапуска;
+      `plugin_list()` — список плагинов.
     - Контракт (namespace `MyHarnessWin.Plugins`):
       `IHarnessPlugin` — свойства `string Name`, `string Description`;
-      `IOneShotPlugin : IHarnessPlugin` — `Task<string> RunAsync(IPluginContext, CancellationToken)`;
+      `IOneShotPlugin : IHarnessPlugin` — `Delegate CreateHandler(IPluginContext)`;
       `IResidentPlugin : IHarnessPlugin` — `IReadOnlyList<AIFunction> GetTools()` и `Task StartAsync(IPluginContext, CancellationToken)`;
-      `IPluginContext` — `string PluginDirectory`, `void Log(string)`.
+      `IPluginContext` — `string PluginDirectory`, `void Log(string)` (пишет в plugin.log и в чат),
+      `Task<string> AskAgentAsync(string, CancellationToken)` — передать запрос пользователя агенту
+      и получить его ответ (так, например, Telegram-бот пересылает входящие сообщения агенту).
     - Стандартные using (System, System.IO, System.Linq, System.Net.Http, System.Threading.Tasks и т.п.)
-      подключены неявно; остальные (например, Microsoft.Extensions.AI, System.Text.Json) указывайте явно.
-      Доступны все сборки приложения; NuGet-пакеты добавить нельзя.
-    - Новые резидентные плагины подхватываются при следующем запуске приложения; одноразовые — сразу.
-    - Примеры уже в папке plugins: `hello-once` (одноразовый), `telegram-bot` (резидентный backend Telegram-бота).
+      подключены неявно; остальные (например, Microsoft.Extensions.AI, System.ComponentModel, System.Text.Json)
+      указывайте явно. Доступны все сборки приложения; NuGet-пакеты добавить нельзя.
+    - Плагин, созданный через `plugin_create`, загружается сразу (горячая загрузка); его инструменты
+      становятся доступны со следующего сообщения. Обновление кода уже загруженного плагина вступает
+      в силу только после перезапуска приложения.
+    - Примеры уже в папке plugins: `hello-once` (одноразовый инструмент с параметром),
+      `telegram-bot` (резидентный backend Telegram-бота, пересылающий сообщения агенту).
 
     ### Папки agents и skills
 
@@ -345,6 +457,12 @@ public sealed class AgentHost : IAsyncDisposable
             shellExecutor,
             http,
             ollama);
+
+        // Wire the plugin → agent channel first, then load plugins: their tools are folded
+        // into the agent by the rebuild below.
+        pluginManager.AgentInvoker = host.RunPluginRequestAsync;
+        pluginManager.LoadPlugins();
+        host.RefreshPluginToolsIfNeeded();
 
         // Adopt the configured model's real context window (rebuilds the agent only
         // when the reported value differs from the default).

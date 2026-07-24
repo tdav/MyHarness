@@ -12,10 +12,13 @@ namespace MyHarnessWin.Plugins;
 
 /// <summary>
 /// Owns the plugins folder (plugins\ next to the exe): compiles plugin sources with Roslyn
-/// in-process (no csproj needed), runs one-shot plugins on demand in a collectible
-/// <see cref="AssemblyLoadContext"/>, keeps resident plugins running for the application
-/// lifetime, and exposes plugin management as agent tools (plugin_create / plugin_run /
-/// plugin_list) so the agent itself can author, compile and execute plugins.
+/// in-process (no csproj needed) and hot-loads them into the running application.
+/// One-shot plugins become <see cref="AIFunction"/> tools of the agent (their delegate
+/// parameters, annotated with [Description], form the tool schema); resident plugins run
+/// for the application lifetime and contribute their own tools. Plugin management itself
+/// is exposed as agent tools (plugin_create / plugin_load / plugin_list), so the agent can
+/// author, compile and load plugins. Plugin logs go to plugin.log and to the chat output
+/// via <see cref="PluginLog"/>; plugins reach the agent through <see cref="AgentInvoker"/>.
 /// </summary>
 public sealed class PluginManager : IAsyncDisposable
 {
@@ -23,7 +26,29 @@ public sealed class PluginManager : IAsyncDisposable
     private static readonly Lazy<IReadOnlyList<MetadataReference>> References = new(BuildReferences);
 
     private readonly CancellationTokenSource shutdownCts = new();
+    private readonly object sync = new();
     private readonly List<(IResidentPlugin Plugin, Task RunTask)> residentPlugins = [];
+    private readonly List<AIFunction> oneShotFunctions = [];
+    private readonly HashSet<string> loadedDirs = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Raised when a plugin is hot-loaded at runtime — the agent must be rebuilt so the
+    /// plugin's tools become available (see AgentHost.RefreshPluginToolsIfNeeded).
+    /// </summary>
+    public event Action? PluginsChanged;
+
+    /// <summary>
+    /// Raised for every <see cref="IPluginContext.Log"/> call: (plugin name, message).
+    /// The main window subscribes and mirrors the messages into the chat output.
+    /// </summary>
+    public event Action<string, string>? PluginLog;
+
+    /// <summary>
+    /// The channel plugins use to talk to the harness agent:
+    /// (plugin name, user message, token) → the agent's final text answer.
+    /// Set by AgentHost right after construction, before plugins are loaded.
+    /// </summary>
+    public Func<string, string, CancellationToken, Task<string>>? AgentInvoker { get; set; }
 
     /// <summary>Gets the root folder that holds one subfolder per plugin.</summary>
     public string PluginsDirectory { get; }
@@ -35,51 +60,67 @@ public sealed class PluginManager : IAsyncDisposable
     }
 
     /// <summary>Gets the resident plugins that were successfully loaded and started.</summary>
-    public IReadOnlyList<IResidentPlugin> ResidentPlugins => this.residentPlugins.Select(p => p.Plugin).ToList();
+    public IReadOnlyList<IResidentPlugin> ResidentPlugins
+    {
+        get
+        {
+            lock (this.sync)
+            {
+                return this.residentPlugins.Select(p => p.Plugin).ToList();
+            }
+        }
+    }
 
     /// <summary>
-    /// Compiles every plugin folder and starts all <see cref="IResidentPlugin"/> implementations.
-    /// Folders that fail to compile or contain only one-shot plugins are skipped (errors are
-    /// written to the plugin's plugin.log). Called once at application startup.
+    /// Compiles and loads every plugin folder (one-shot tools + resident plugins).
+    /// Folders that fail to compile are skipped (errors go to the plugin's plugin.log).
+    /// Called once at application startup.
     /// </summary>
-    public void LoadResidentPlugins()
+    public void LoadPlugins()
     {
         foreach (var dir in Directory.EnumerateDirectories(this.PluginsDirectory))
         {
             try
             {
-                var (assembly, alc, errors) = Compile(dir);
-                if (assembly is null)
-                {
-                    WriteLog(dir, $"Ошибка компиляции при загрузке: {errors}");
-                    continue;
-                }
-
-                var residentTypes = GetPluginTypes<IResidentPlugin>(assembly);
-                if (residentTypes.Count == 0)
-                {
-                    alc!.Unload(); // One-shot-only plugin: nothing to keep resident.
-                    continue;
-                }
-
-                foreach (var type in residentTypes)
-                {
-                    var plugin = (IResidentPlugin)Activator.CreateInstance(type)!;
-                    var context = new PluginContext(dir);
-                    var runTask = Task.Run(() => plugin.StartAsync(context, this.shutdownCts.Token));
-                    this.residentPlugins.Add((plugin, runTask));
-                }
+                this.TryLoadFrom(dir, out _);
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to load resident plugin from {Dir}", dir);
+                Log.Error(ex, "Failed to load plugin from {Dir}", dir);
                 WriteLog(dir, $"Ошибка загрузки плагина: {ex.Message}");
             }
         }
     }
 
     /// <summary>
-    /// Gets the plugin-management tools plus every tool contributed by loaded resident plugins.
+    /// Hot-loads a plugin folder into the running application (no restart). One-shot tools
+    /// and resident plugins start immediately; their tools reach the agent after the current
+    /// turn, when the host rebuilds the agent in response to <see cref="PluginsChanged"/>.
+    /// </summary>
+    public string LoadPlugin(string name)
+    {
+        var dir = Path.Combine(this.PluginsDirectory, name);
+        if (!Directory.Exists(dir))
+        {
+            return $"Ошибка: плагин '{name}' не найден в {this.PluginsDirectory}.";
+        }
+
+        try
+        {
+            return this.TryLoadFrom(dir, out var message)
+                ? $"Плагин '{name}' загружен ({message}); инструменты станут доступны со следующего сообщения."
+                : $"Плагин '{name}' не загружен: {message}";
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Hot load of plugin {Plugin} failed", name);
+            return $"Ошибка загрузки плагина '{name}': {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Gets the plugin-management tools, every loaded one-shot plugin as an AIFunction,
+    /// and every tool contributed by loaded resident plugins.
     /// </summary>
     public IReadOnlyList<AITool> GetAgentTools()
     {
@@ -87,31 +128,36 @@ public sealed class PluginManager : IAsyncDisposable
         [
             AIFunctionFactory.Create(
                 ([Description("Имя плагина: латиница, цифры, '-' и '_'.")] string name,
-                 [Description("Полный исходный код плагина (один .cs-файл, using-директивы указывать явно).")] string sourceCode) =>
+                 [Description("Полный исходный код плагина (один .cs-файл).")] string sourceCode) =>
                     this.CreatePlugin(name, sourceCode),
                 name: "plugin_create",
-                description: "Создать или обновить плагин: сохраняет исходник в plugins\\<имя>\\plugin.cs и компилирует его. " +
-                             "Возвращает результат компиляции и обнаруженный тип плагина (одноразовый / резидентный)."),
+                description: "Создать или обновить плагин: сохраняет исходник в plugins\\<имя>\\plugin.cs, компилирует " +
+                             "и сразу загружает его (одноразовый плагин становится инструментом агента с параметрами, " +
+                             "резидентный — запускается)."),
             AIFunctionFactory.Create(
-                ([Description("Имя плагина (папка внутри plugins).")] string name, CancellationToken cancellationToken) =>
-                    this.RunOneShotAsync(name, cancellationToken),
-                name: "plugin_run",
-                description: "Скомпилировать и выполнить одноразовый плагин (IOneShotPlugin). Возвращает результат RunAsync."),
+                ([Description("Имя плагина (папка внутри plugins).")] string name) => this.LoadPlugin(name),
+                name: "plugin_load",
+                description: "Загрузить плагин в работающее приложение без перезапуска. Плагины, созданные через " +
+                             "plugin_create, загружаются автоматически — этот инструмент нужен для папок, добавленных вручную."),
             AIFunctionFactory.Create(
                 () => this.ListPlugins(),
                 name: "plugin_list",
-                description: "Список плагинов: папки в plugins\\ и загруженные резидентные плагины с их инструментами."),
+                description: "Список плагинов: папки в plugins\\, загруженные одноразовые инструменты и резидентные плагины."),
         ];
 
-        foreach (var (plugin, _) in this.residentPlugins)
+        lock (this.sync)
         {
-            tools.AddRange(plugin.GetTools());
+            tools.AddRange(this.oneShotFunctions);
+            foreach (var (plugin, _) in this.residentPlugins)
+            {
+                tools.AddRange(plugin.GetTools());
+            }
         }
 
         return tools;
     }
 
-    /// <summary>Saves the source into plugins\name\plugin.cs and compiles it as a validity check.</summary>
+    /// <summary>Saves the source into plugins\name\plugin.cs, compiles and hot-loads it.</summary>
     public string CreatePlugin(string name, string sourceCode)
     {
         if (!PluginNamePattern.IsMatch(name))
@@ -128,68 +174,32 @@ public sealed class PluginManager : IAsyncDisposable
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "plugin.cs"), sourceCode);
 
-        var (assembly, alc, errors) = Compile(dir);
-        if (assembly is null)
+        bool alreadyLoaded;
+        lock (this.sync)
         {
-            return $"Исходник сохранён, но компиляция не удалась:{Environment.NewLine}{errors}";
+            alreadyLoaded = this.loadedDirs.Contains(dir);
         }
 
-        var oneShot = GetPluginTypes<IOneShotPlugin>(assembly).Count;
-        var resident = GetPluginTypes<IResidentPlugin>(assembly).Count;
-        alc!.Unload();
-
-        if (oneShot == 0 && resident == 0)
+        if (alreadyLoaded)
         {
-            return "Скомпилировано, но не найден класс, реализующий IOneShotPlugin или IResidentPlugin.";
-        }
-
-        var kind = resident > 0
-            ? "резидентный (IResidentPlugin) — будет загружен при следующем запуске приложения"
-            : "одноразовый (IOneShotPlugin) — выполняется через plugin_run";
-        return $"Плагин '{name}' скомпилирован успешно. Тип: {kind}.";
-    }
-
-    /// <summary>Compiles and runs a one-shot plugin, then unloads its assembly.</summary>
-    public async Task<string> RunOneShotAsync(string name, CancellationToken cancellationToken)
-    {
-        var dir = Path.Combine(this.PluginsDirectory, name);
-        if (!Directory.Exists(dir))
-        {
-            return $"Ошибка: плагин '{name}' не найден в {this.PluginsDirectory}.";
-        }
-
-        var (assembly, alc, errors) = Compile(dir);
-        if (assembly is null)
-        {
-            return $"Ошибка компиляции:{Environment.NewLine}{errors}";
-        }
-
-        try
-        {
-            var type = GetPluginTypes<IOneShotPlugin>(assembly).FirstOrDefault();
-            if (type is null)
+            // Verify the new source still compiles, but the running instance keeps the old code.
+            var (assembly, alc, errors) = Compile(dir);
+            if (assembly is null)
             {
-                return GetPluginTypes<IResidentPlugin>(assembly).Count > 0
-                    ? $"'{name}' — резидентный плагин; он загружается при старте приложения, а не через plugin_run."
-                    : $"Ошибка: в '{name}' нет класса, реализующего IOneShotPlugin.";
+                return $"Исходник сохранён, но компиляция не удалась:{Environment.NewLine}{errors}";
             }
 
-            var plugin = (IOneShotPlugin)Activator.CreateInstance(type)!;
-            WriteLog(dir, $"Запуск одноразового плагина '{plugin.Name}'.");
-            return await plugin.RunAsync(new PluginContext(dir), cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "One-shot plugin {Plugin} failed", name);
-            return $"Ошибка выполнения плагина '{name}': {ex.Message}";
-        }
-        finally
-        {
             alc!.Unload();
+            return $"Плагин '{name}' скомпилирован успешно. Плагин уже загружен — " +
+                   "обновлённый код вступит в силу после перезапуска приложения.";
         }
+
+        return this.TryLoadFrom(dir, out var message)
+            ? $"Плагин '{name}' скомпилирован и загружен ({message}); инструменты станут доступны со следующего сообщения."
+            : $"Исходник сохранён, но плагин не загружен: {message}";
     }
 
-    /// <summary>Lists plugin folders and the currently loaded resident plugins with their tools.</summary>
+    /// <summary>Lists plugin folders, loaded one-shot tools and resident plugins.</summary>
     public string ListPlugins()
     {
         var sb = new StringBuilder();
@@ -198,10 +208,23 @@ public sealed class PluginManager : IAsyncDisposable
         sb.AppendLine($"Папка плагинов: {this.PluginsDirectory}");
         sb.AppendLine(dirs.Count == 0 ? "Плагинов нет." : $"Папки плагинов: {string.Join(", ", dirs.Select(Path.GetFileName))}");
 
-        if (this.residentPlugins.Count > 0)
+        List<AIFunction> oneShots;
+        List<(IResidentPlugin Plugin, Task RunTask)> loaded;
+        lock (this.sync)
+        {
+            oneShots = [.. this.oneShotFunctions];
+            loaded = [.. this.residentPlugins];
+        }
+
+        if (oneShots.Count > 0)
+        {
+            sb.AppendLine($"Одноразовые плагины-инструменты: {string.Join(", ", oneShots.Select(f => f.Name))}");
+        }
+
+        if (loaded.Count > 0)
         {
             sb.AppendLine("Загруженные резидентные плагины:");
-            foreach (var (plugin, runTask) in this.residentPlugins)
+            foreach (var (plugin, runTask) in loaded)
             {
                 var toolNames = plugin.GetTools().Select(t => t.Name);
                 var state = runTask.IsFaulted ? "ошибка" : runTask.IsCompleted ? "завершён" : "работает";
@@ -216,9 +239,15 @@ public sealed class PluginManager : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         this.shutdownCts.Cancel();
+        List<Task> runTasks;
+        lock (this.sync)
+        {
+            runTasks = this.residentPlugins.Select(p => p.RunTask).ToList();
+        }
+
         try
         {
-            await Task.WhenAll(this.residentPlugins.Select(p => p.RunTask))
+            await Task.WhenAll(runTasks)
                 .WaitAsync(TimeSpan.FromSeconds(3))
                 .ConfigureAwait(false);
         }
@@ -229,6 +258,66 @@ public sealed class PluginManager : IAsyncDisposable
         }
 
         this.shutdownCts.Dispose();
+    }
+
+    // Compiles the folder and loads its plugins (one-shot tools + resident). Returns false
+    // with a reason when nothing was loaded; on success the message summarizes what loaded.
+    private bool TryLoadFrom(string dir, out string message)
+    {
+        lock (this.sync)
+        {
+            if (this.loadedDirs.Contains(dir))
+            {
+                message = "уже загружен (обновление кода работающего плагина требует перезапуска приложения)";
+                return false;
+            }
+        }
+
+        var (assembly, alc, errors) = Compile(dir);
+        if (assembly is null)
+        {
+            WriteLog(dir, $"Ошибка компиляции при загрузке: {errors}");
+            message = $"ошибка компиляции:{Environment.NewLine}{errors}";
+            return false;
+        }
+
+        var oneShotTypes = GetPluginTypes<IOneShotPlugin>(assembly);
+        var residentTypes = GetPluginTypes<IResidentPlugin>(assembly);
+        if (oneShotTypes.Count == 0 && residentTypes.Count == 0)
+        {
+            alc!.Unload();
+            message = "нет класса, реализующего IOneShotPlugin или IResidentPlugin";
+            return false;
+        }
+
+        var parts = new List<string>();
+        var context = new PluginContext(this, dir);
+        lock (this.sync)
+        {
+            foreach (var type in oneShotTypes)
+            {
+                var plugin = (IOneShotPlugin)Activator.CreateInstance(type)!;
+                this.oneShotFunctions.Add(AIFunctionFactory.Create(
+                    plugin.CreateHandler(context),
+                    name: plugin.Name,
+                    description: plugin.Description));
+                parts.Add($"инструмент '{plugin.Name}'");
+            }
+
+            foreach (var type in residentTypes)
+            {
+                var plugin = (IResidentPlugin)Activator.CreateInstance(type)!;
+                var runTask = Task.Run(() => plugin.StartAsync(context, this.shutdownCts.Token));
+                this.residentPlugins.Add((plugin, runTask));
+                parts.Add($"резидентный '{plugin.Name}'");
+            }
+
+            this.loadedDirs.Add(dir);
+        }
+
+        this.PluginsChanged?.Invoke();
+        message = string.Join(", ", parts);
+        return true;
     }
 
     // Compiles every .cs file in the plugin folder into an in-memory assembly loaded in a
@@ -313,6 +402,9 @@ public sealed class PluginManager : IAsyncDisposable
     private static List<Type> GetPluginTypes<T>(Assembly assembly) =>
         assembly.GetTypes().Where(t => !t.IsAbstract && typeof(T).IsAssignableFrom(t)).ToList();
 
+    private void RaisePluginLog(string pluginName, string message) =>
+        this.PluginLog?.Invoke(pluginName, message);
+
     private static void WriteLog(string pluginDir, string message)
     {
         try
@@ -325,10 +417,23 @@ public sealed class PluginManager : IAsyncDisposable
     }
 
     // IPluginContext implementation handed to plugins.
-    private sealed class PluginContext(string pluginDirectory) : IPluginContext
+    private sealed class PluginContext(PluginManager owner, string pluginDirectory) : IPluginContext
     {
         public string PluginDirectory { get; } = pluginDirectory;
 
-        public void Log(string message) => WriteLog(this.PluginDirectory, message);
+        private string PluginName => Path.GetFileName(this.PluginDirectory);
+
+        public void Log(string message)
+        {
+            WriteLog(this.PluginDirectory, message);
+            owner.RaisePluginLog(this.PluginName, message);
+        }
+
+        public Task<string> AskAgentAsync(string message, CancellationToken cancellationToken)
+        {
+            var invoker = owner.AgentInvoker
+                ?? throw new InvalidOperationException("Агент ещё не инициализирован.");
+            return invoker(this.PluginName, message, cancellationToken);
+        }
     }
 }

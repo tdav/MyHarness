@@ -275,7 +275,7 @@ partial class MainForm
         // 
         usageLabel.ForeColor = Color.FromArgb(133, 147, 165);
         usageLabel.Name = "usageLabel";
-        usageLabel.Size = new Size(957, 17);
+        usageLabel.Size = new Size(988, 17);
         usageLabel.Spring = true;
         usageLabel.TextAlign = ContentAlignment.MiddleLeft;
         // 

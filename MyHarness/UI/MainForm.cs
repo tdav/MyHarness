@@ -70,7 +70,7 @@ public sealed partial class MainForm : Form
 
         // ---- Event wiring (kept out of the designer file) ----
 
-         
+
 
         foreach (ToolStripItem item in this.modeMenu.DropDownItems)
         {
@@ -276,6 +276,21 @@ public sealed partial class MainForm : Form
         {
             var host = await Task.Run(() => AgentHost.CreateAsync(folder));
             this.hosts[folder] = host;
+
+            // Mirror plugin logs into the chat output (they arrive from background threads).
+            host.Plugins.PluginLog += (plugin, message) =>
+            {
+                if (!this.IsHandleCreated)
+                {
+                    return;
+                }
+
+                this.BeginInvoke(() =>
+                {
+                    this.AppendLine($"🔌 [{plugin}] {message}", MarkdownViewer.SegmentKind.Info);
+                    this.FlushOutput();
+                });
+            };
             if (!this.modelsLoaded)
             {
                 await this.LoadModelListAsync(host);
@@ -437,6 +452,53 @@ public sealed partial class MainForm : Form
             this.EnsureLineBreak();
             this.FlushOutput(); // the full context must be visible before modal approval dialogs
             next = approvals.Count > 0 ? this.CollectApprovalResponses(approvals) : null;
+        }
+
+        // A resident plugin hot-loaded during this turn (plugin_create/plugin_load) requires
+        // an agent rebuild so its tools become available from the next message.
+        await this.RefreshPluginToolsAsync(entry.Host);
+    }
+
+    /// <summary>
+    /// Rebuilds the host's agent after a resident plugin hot-load and re-attaches every
+    /// session of that host to the new agent (same migration as a model switch).
+    /// </summary>
+    private async Task RefreshPluginToolsAsync(AgentHost host)
+    {
+        if (!host.HasPendingPluginTools)
+        {
+            return;
+        }
+
+        try
+        {
+            var oldAgent = host.Agent;
+            var affected = this.sessions.Where(s => ReferenceEquals(s.Host, host)).ToList();
+            var snapshots = new Dictionary<SessionEntry, JsonElement>();
+            foreach (var session in affected)
+            {
+                snapshots[session] = await oldAgent.SerializeSessionAsync(session.Session);
+            }
+
+            if (!host.RefreshPluginToolsIfNeeded())
+            {
+                return;
+            }
+
+            foreach (var session in affected)
+            {
+                session.Session = await host.Agent.DeserializeSessionAsync(snapshots[session]);
+            }
+
+            this.modeProvider = host.Agent.GetService<AgentModeProvider>();
+            this.AppendLine(
+                "🔌 Резидентный плагин загружен: его инструменты доступны со следующего сообщения.",
+                MarkdownViewer.SegmentKind.Info);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Plugin tools refresh failed");
+            this.AppendLine($"❌ Не удалось обновить инструменты плагинов: {ex.Message}", MarkdownViewer.SegmentKind.Error);
         }
     }
 
@@ -635,7 +697,7 @@ public sealed partial class MainForm : Form
 
                 this.modeProvider = host.Agent.GetService<AgentModeProvider>();
             }
-            
+
             this.UpdateModelMenu(modelName);
             this.AppendLine(
                 $"Модель переключена: {modelName} (контекстное окно: {host.ContextWindowTokens:N0} токенов; " +
@@ -901,5 +963,10 @@ public sealed partial class MainForm : Form
         public string UsageText { get; set; } = "📊 TOKENS —";
 
         public bool AtLineStart { get; set; } = true;
+    }
+
+    private void sendButton_Click(object sender, EventArgs e)
+    {
+
     }
 }
