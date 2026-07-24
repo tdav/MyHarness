@@ -32,7 +32,7 @@ public sealed class AgentHost : IAsyncDisposable
     /// <summary>Upper bound for the output-token budget; shrinks for small-context models.</summary>
     public const int MaxOutputTokens = 16_384;
 
-    private const string TracingSourceName = "Test05.Win";
+    private const string TracingSourceName = "MyHarness.Win";
 
     private readonly TracerProvider? tracerProvider;
     private readonly HyperlightCodeActProvider codeAct;
