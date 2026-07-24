@@ -1,5 +1,6 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using Serilog;
 using System.Text.Json;
 
 namespace MyHarnessWin.UI;
@@ -135,9 +136,10 @@ public sealed partial class MainForm : Form
             {
                 host.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
-            catch
+            catch (Exception ex)
             {
                 // Best-effort cleanup on exit.
+                Log.Warning(ex, "AgentHost dispose failed on exit");
             }
         }
 
@@ -283,6 +285,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Agent host creation failed for folder {Folder}", folder);
             MessageBox.Show(this, ex.Message, "Ошибка запуска агента", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return null;
         }
@@ -316,6 +319,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Session creation failed in folder {Folder}", folder);
             this.AppendLine($"❌ Не удалось создать сессию: {ex.Message}", MarkdownViewer.SegmentKind.Error);
         }
         finally
@@ -426,6 +430,7 @@ public sealed partial class MainForm : Form
             }
             catch (Exception ex)
             {
+                Log.Error(ex, "Agent turn stream failed");
                 this.AppendLine($"❌ Ошибка потока: {ex.GetType().Name}: {ex.Message}", MarkdownViewer.SegmentKind.Error);
             }
 
@@ -639,6 +644,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Model switch to {Model} failed", modelName);
             this.AppendLine($"❌ Не удалось переключить модель: {ex.Message}", MarkdownViewer.SegmentKind.Error);
         }
         finally
@@ -664,6 +670,7 @@ public sealed partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "Mode switch to {Mode} failed", mode);
             this.AppendLine($"❌ Не удалось переключить режим: {ex.Message}", MarkdownViewer.SegmentKind.Error);
             await this.RefreshModeAsync();
         }
@@ -694,9 +701,10 @@ public sealed partial class MainForm : Form
             string mode = await this.modeProvider.GetModeAsync(this.active.Session);
             this.UpdateModeMenu(mode);
         }
-        catch
+        catch (Exception ex)
         {
             // Mode display is cosmetic; ignore transient provider errors.
+            Log.Debug(ex, "Mode refresh failed");
         }
     }
 
@@ -774,8 +782,9 @@ public sealed partial class MainForm : Form
             {
                 args = JsonSerializer.Serialize(fc.Arguments, ToolArgsJsonOptions);
             }
-            catch (NotSupportedException)
+            catch (NotSupportedException ex)
             {
+                Log.Debug(ex, "Tool args serialization failed for {Tool}, falling back to plain join", fc.Name);
                 args = string.Join(", ", fc.Arguments.Select(kv => $"{kv.Key}={kv.Value}"));
             }
 

@@ -5,11 +5,13 @@ using Microsoft.Agents.AI.Tools.Shell;
 using Microsoft.Extensions.AI;
 using OllamaSharp;
 using OllamaSharp.Models;
+using Serilog;
 using OpenTelemetry.Trace;
 using System.ComponentModel;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MyHarnessWin.Plugins;
 using MyHarnessWin.Tracing;
 
 namespace MyHarnessWin;
@@ -38,6 +40,7 @@ public sealed class AgentHost : IAsyncDisposable
     private readonly OllamaApiClient ollama;
     private readonly string instructions;
     private readonly AIFunction searchFilesTool;
+    private readonly PluginManager pluginManager;
 
     /// <summary>
     /// Gets the configured harness agent. The instance is replaced when a model switch
@@ -68,6 +71,7 @@ public sealed class AgentHost : IAsyncDisposable
         int contextWindowTokens,
         string instructions,
         AIFunction searchFilesTool,
+        PluginManager pluginManager,
         TracerProvider? tracerProvider,
         HyperlightCodeActProvider codeAct,
         LocalShellExecutor shellExecutor,
@@ -79,6 +83,7 @@ public sealed class AgentHost : IAsyncDisposable
         this.ContextWindowTokens = contextWindowTokens;
         this.instructions = instructions;
         this.searchFilesTool = searchFilesTool;
+        this.pluginManager = pluginManager;
         this.tracerProvider = tracerProvider;
         this.codeAct = codeAct;
         this.shellExecutor = shellExecutor;
@@ -160,9 +165,11 @@ public sealed class AgentHost : IAsyncDisposable
 
             return null;
         }
-        catch
+        catch (Exception ex)
         {
-            return null; // Unknown model / offline endpoint — the caller falls back to the default.
+            // Unknown model / offline endpoint — the caller falls back to the default.
+            Log.Warning(ex, "Failed to query context length for model {Model}", modelName);
+            return null;
         }
     }
 
@@ -183,8 +190,9 @@ public sealed class AgentHost : IAsyncDisposable
                 .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Warning(ex, "Failed to list models from the Ollama endpoint");
             return [];
         }
     }
@@ -217,6 +225,11 @@ public sealed class AgentHost : IAsyncDisposable
         SeedExampleScripts(Path.Combine(baseDir, "dotnet-scripts"), scriptsDir);
 
         var tracerProvider = HarnessTracing.CreateFileTracerProvider(TracingSourceName);
+
+        // Plugins live next to the exe (like skills/ and agents/); resident plugins are
+        // compiled and started here so their tools can be handed to the agent below.
+        var pluginManager = new PluginManager(Path.Combine(baseDir, "plugins"));
+        pluginManager.LoadResidentPlugins();
 
         var codeAct = new HyperlightCodeActProvider(
             HyperlightCodeActProviderOptions.CreateForWasm(PythonGuestModule.GetModulePath()));
@@ -288,6 +301,27 @@ public sealed class AgentHost : IAsyncDisposable
     - Специализированные роли для скриптов: `dotnet-scripter`, `dotnet-analyst`, `dotnet-automator`
       (см. папку agents ниже); подробный сценарий — в навыке `dotnet-script`.
 
+    ### Плагины
+
+    - Плагины — это C#-код, который приложение само компилирует и выполняет (Roslyn, без csproj).
+      Каждый плагин живёт в своей папке: {Path.Combine(baseDir, "plugins")}\<имя>\plugin.cs
+    - Два типа плагинов:
+      1. Одноразовый (`IOneShotPlugin`) — метод `RunAsync` выполняется по требованию через `plugin_run` и завершается.
+      2. Резидентный (`IResidentPlugin`) — загружается вместе с приложением: `StartAsync` работает всё время
+         (например, backend Telegram-бота), `GetTools()` отдаёт инструменты плагина агенту.
+    - Инструменты: `plugin_create(name, sourceCode)` — создать/обновить и скомпилировать плагин;
+      `plugin_run(name)` — выполнить одноразовый плагин; `plugin_list()` — список плагинов.
+    - Контракт (namespace `MyHarnessWin.Plugins`):
+      `IHarnessPlugin` — свойства `string Name`, `string Description`;
+      `IOneShotPlugin : IHarnessPlugin` — `Task<string> RunAsync(IPluginContext, CancellationToken)`;
+      `IResidentPlugin : IHarnessPlugin` — `IReadOnlyList<AIFunction> GetTools()` и `Task StartAsync(IPluginContext, CancellationToken)`;
+      `IPluginContext` — `string PluginDirectory`, `void Log(string)`.
+    - Стандартные using (System, System.IO, System.Linq, System.Net.Http, System.Threading.Tasks и т.п.)
+      подключены неявно; остальные (например, Microsoft.Extensions.AI, System.Text.Json) указывайте явно.
+      Доступны все сборки приложения; NuGet-пакеты добавить нельзя.
+    - Новые резидентные плагины подхватываются при следующем запуске приложения; одноразовые — сразу.
+    - Примеры уже в папке plugins: `hello-once` (одноразовый), `telegram-bot` (резидентный backend Telegram-бота).
+
     ### Папки agents и skills
 
     - `{Path.Combine(baseDir, "skills")}\<skill>\SKILL.md` — обнаруживаемые навыки (загружаются по мере необходимости провайдером навыков).
@@ -305,6 +339,7 @@ public sealed class AgentHost : IAsyncDisposable
             DefaultContextWindowTokens,
             instructions,
             searchFilesTool,
+            pluginManager,
             tracerProvider,
             codeAct,
             shellExecutor,
@@ -365,7 +400,7 @@ public sealed class AgentHost : IAsyncDisposable
             {
                 Instructions = this.instructions,
                 MaxOutputTokens = this.OutputTokens,
-                Tools = [this.searchFilesTool, this.shellExecutor.AsAIFunction(requireApproval: true)],
+                Tools = [this.searchFilesTool, this.shellExecutor.AsAIFunction(requireApproval: true), .. this.pluginManager.GetAgentTools()],
                 Reasoning = new() { Effort = ReasoningEffort.Medium },
             },
         });
@@ -374,6 +409,7 @@ public sealed class AgentHost : IAsyncDisposable
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
+        await this.pluginManager.DisposeAsync().ConfigureAwait(false);
         this.codeAct.Dispose();
         await this.shellExecutor.DisposeAsync().ConfigureAwait(false);
         this.http.Dispose();
@@ -400,8 +436,8 @@ public sealed class AgentHost : IAsyncDisposable
                 }
             }
         }
-        catch (IOException) { /* seeding is best-effort */ }
-        catch (UnauthorizedAccessException) { /* seeding is best-effort */ }
+        catch (IOException ex) { Log.Warning(ex, "Example script seeding failed"); }
+        catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Example script seeding failed"); }
     }
 
     // Recursive content search under the working folder (the search_files tool body).
@@ -456,8 +492,8 @@ public sealed class AgentHost : IAsyncDisposable
                     }
                 }
             }
-            catch (IOException) { /* skip unreadable file */ }
-            catch (UnauthorizedAccessException) { /* skip no-access file */ }
+            catch (IOException ex) { Log.Debug(ex, "search_files: skipping unreadable file {File}", file); }
+            catch (UnauthorizedAccessException ex) { Log.Debug(ex, "search_files: skipping no-access file {File}", file); }
         }
 
         return results.Count == 0

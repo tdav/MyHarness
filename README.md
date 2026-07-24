@@ -102,10 +102,25 @@ Microsoft Agent Framework (`Microsoft.Agents.AI` + `Microsoft.Agents.AI.Harness`
   - `dotnet-automator` — повторяемые файловые автоматизации (dry-run по умолчанию,
     изменения только с `--apply`, резервные копии).
 
+### Плагины
+
+Плагины — C#-файлы в `plugins\<имя>\plugin.cs` рядом с exe; приложение само
+компилирует их (Roslyn, без csproj). Два типа: одноразовые (`IOneShotPlugin`,
+запуск по требованию через инструмент `plugin_run`) и резидентные
+(`IResidentPlugin`, загружаются при старте, `GetTools()` отдаёт их инструменты
+агенту). Агент может сам создавать плагины инструментом `plugin_create`.
+Примеры: `hello-once` (одноразовый) и `telegram-bot` (резидентный backend
+Telegram-бота: long polling, инструмент `telegram_send`; токен — `token.txt`
+в папке плагина или переменная `TELEGRAM_BOT_TOKEN`). Логи плагина — в
+`plugins\<имя>\plugin.log`. Исходники примеров: `plugin-examples\`.
+
 ### Трассировка
 
 OpenTelemetry-трассы (включая HTTP-инструментирование) пишутся в файлы
-`traces_*.log` рядом с exe. Источник — `Test05.Win`.
+`traces_*.log` в папке `traces` рядом с exe. Источник — `Test05.Win`.
+
+Логи приложения (Serilog) — в папке `logs` рядом с exe: `app-YYYYMMDD.log`,
+ротация по дням, хранится 30 файлов. Все обработчики исключений пишут сюда.
 
 ---
 

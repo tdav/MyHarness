@@ -1,4 +1,5 @@
 using MyHarnessWin.UI;
+using Serilog;
 
 namespace MyHarnessWin;
 
@@ -13,27 +14,49 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
-        ApplicationConfiguration.Initialize();
+        // Rolling file log in logs\ next to the exe; every catch block reports here.
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Debug()
+            .WriteTo.File(
+                Path.Combine(AppContext.BaseDirectory, "logs", "app-.log"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 30)
+            .CreateLogger();
 
-        string? folder = AppSettings.LoadLastWorkingFolder();
-        if (folder is null || !Directory.Exists(folder))
+        try
         {
-            using var folderDialog = new FolderBrowserDialog
-            {
-                Description = "Выберите рабочую папку агента (file_access, поиск и команды будут работать в ней)",
-                UseDescriptionForTitle = true,
-                ShowNewFolderButton = true,
-                SelectedPath = folder ?? string.Empty,
-            };
+            Log.Information("Application starting");
+            ApplicationConfiguration.Initialize();
 
-            if (folderDialog.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(folderDialog.SelectedPath))
+            string? folder = AppSettings.LoadLastWorkingFolder();
+            if (folder is null || !Directory.Exists(folder))
             {
-                return; // The working folder is mandatory — without it the agent has nothing to operate on.
+                using var folderDialog = new FolderBrowserDialog
+                {
+                    Description = "Выберите рабочую папку агента (file_access, поиск и команды будут работать в ней)",
+                    UseDescriptionForTitle = true,
+                    ShowNewFolderButton = true,
+                    SelectedPath = folder ?? string.Empty,
+                };
+
+                if (folderDialog.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(folderDialog.SelectedPath))
+                {
+                    return; // The working folder is mandatory — without it the agent has nothing to operate on.
+                }
+
+                folder = folderDialog.SelectedPath;
             }
 
-            folder = folderDialog.SelectedPath;
+            Application.Run(new MainForm(folder));
         }
-
-        Application.Run(new MainForm(folder));
+        catch (Exception ex)
+        {
+            Log.Fatal(ex, "Application terminated unexpectedly");
+            throw;
+        }
+        finally
+        {
+            Log.CloseAndFlush();
+        }
     }
 }

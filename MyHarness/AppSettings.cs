@@ -1,3 +1,4 @@
+using Serilog;
 using System.Text.Json;
 
 namespace MyHarnessWin;
@@ -30,9 +31,10 @@ internal static class AppSettings
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Corrupt settings are not fatal — the folder picker takes over.
+            Log.Warning(ex, "Failed to load settings from {Path}", FilePath);
         }
 
         return null;
@@ -45,9 +47,10 @@ internal static class AppSettings
             Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
             File.WriteAllText(FilePath, JsonSerializer.Serialize(new Model(folder)));
         }
-        catch
+        catch (Exception ex)
         {
             // Saving is best-effort; the next launch just shows the picker again.
+            Log.Warning(ex, "Failed to save settings to {Path}", FilePath);
         }
     }
 }

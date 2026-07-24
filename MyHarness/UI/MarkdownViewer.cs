@@ -1,6 +1,7 @@
 using Markdig;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using Serilog;
 using System.Diagnostics;
 using System.Net;
 using System.Text;
@@ -111,9 +112,10 @@ public sealed class MarkdownViewer : UserControl
                     {
                         Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true });
                     }
-                    catch
+                    catch (Exception ex)
                     {
                         // No default browser — ignore.
+                        Log.Warning(ex, "Failed to open external link {Url}", args.Uri);
                     }
                 }
             };
@@ -134,6 +136,7 @@ public sealed class MarkdownViewer : UserControl
         catch (Exception ex)
         {
             // Most likely the WebView2 runtime is missing — show why instead of a blank box.
+            Log.Error(ex, "WebView2 initialization failed");
             this.Controls.Add(new Label
             {
                 Dock = DockStyle.Fill,

@@ -15,13 +15,15 @@ public static class HarnessTracing
     /// <summary>
     /// Creates a <see cref="TracerProvider"/> that captures spans from the specified source and HTTP client activity,
     /// enriching HTTP spans with full request/response headers and bodies, and exports all spans to a timestamped
-    /// text file in the application base directory.
+    /// text file in the "traces" subdirectory of the application base directory.
     /// </summary>
     /// <param name="sourceName">The activity source name to subscribe to (e.g., "Test05.Win").</param>
     /// <returns>A configured <see cref="TracerProvider"/>, or <see langword="null"/> if the builder returns null.</returns>
     public static TracerProvider? CreateFileTracerProvider(string sourceName)
     {
-        var traceLogPath = Path.Combine(AppContext.BaseDirectory, $"traces_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid()}.log");
+        var traceLogDir = Path.Combine(AppContext.BaseDirectory, "traces");
+        Directory.CreateDirectory(traceLogDir);
+        var traceLogPath = Path.Combine(traceLogDir, $"traces_{DateTime.UtcNow:yyyyMMdd_HHmmss}_{Guid.NewGuid()}.log");
 
         return Sdk.CreateTracerProviderBuilder()
             .AddSource(sourceName)
