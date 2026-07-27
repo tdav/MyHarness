@@ -65,7 +65,7 @@ public sealed partial class MainForm : Form
         this.folderLabel.Text = initialFolder;
 
         // While the agent is streaming, buffered chunks are flushed every 2 seconds.
-        this.flushTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+        this.flushTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         this.flushTimer.Tick += (_, _) => this.FlushOutput();
 
         // ---- Event wiring (kept out of the designer file) ----
@@ -91,6 +91,10 @@ public sealed partial class MainForm : Form
         };
 
         this.folderMenuItem.Click += async (_, _) => await this.PickFolderAsync();
+
+        // The "Ресурсы" dropdown is filled on open, never cached: the agent can create a
+        // plugin or a script mid-session and the list must show it without a restart.
+        this.resourcesMenu.DropDownOpening += (_, _) => this.RebuildResourcesMenu();
 
         this.sessionList.ClientSizeChanged += (_, _) =>
             this.sessionColumn.Width = Math.Max(40, this.sessionList.ClientSize.Width);
@@ -359,7 +363,7 @@ public sealed partial class MainForm : Form
 
         this.usageLabel.Text = entry.UsageText;
         this.folderLabel.Text = entry.Folder;
-        this.UpdateModelMenu(entry.Host.ModelName);
+        this.UpdateModelMenu(entry.Host.ModelName.ToUpper());
 
         if (greet)
         {
@@ -385,6 +389,183 @@ public sealed partial class MainForm : Form
             this.active.UsageText = this.usageLabel.Text ?? string.Empty;
         }
     }
+
+    // ---- "Ресурсы" menu: everything the agent can currently reach ----
+
+    /// <summary>
+    /// Rebuilds the "Ресурсы" dropdown from disk. Agents, skills and plugins live next to
+    /// the exe (each in its own folder); dotnet scripts live in the active session's
+    /// working folder. Picking an entry fills the input box with a ready prompt.
+    /// </summary>
+    private void RebuildResourcesMenu()
+    {
+        var baseDir = AppContext.BaseDirectory;
+
+        this.FillResourceMenu(
+            this.agentsMenuItem,
+            "Агенты",
+            DiscoverFolders(Path.Combine(baseDir, "agents"), "AGENTS.md"),
+            item => $"Прочитай \"{item.Path}\" и прими эту роль.");
+
+        this.FillResourceMenu(
+            this.skillsMenuItem,
+            "Навыки (skills)",
+            DiscoverFolders(Path.Combine(baseDir, "skills"), "SKILL.md"),
+            item => $"Применяй навык \"{item.Name}\" (\"{item.Path}\") для задачи: ");
+
+        this.FillResourceMenu(
+            this.pluginsMenuItem,
+            "Плагины",
+            DiscoverFolders(Path.Combine(baseDir, "plugins"), "plugin.cs"),
+            item => $"Покажи, что умеет плагин \"{item.Name}\", и пример вызова его инструментов.");
+
+        // Scripts are per-session: without an open session there is no working folder yet.
+        var workingDir = this.active?.Host.WorkingDirectory;
+        this.FillResourceMenu(
+            this.scriptsMenuItem,
+            "Скрипты (dotnet)",
+            workingDir is null ? [] : DiscoverFiles(Path.Combine(workingDir, "scripts"), "*.cs"),
+            item => $"Запусти скрипт: dotnet run scripts\\{Path.GetFileName(item.Path)}");
+    }
+
+    private void FillResourceMenu(
+        ToolStripMenuItem parent,
+        string title,
+        IReadOnlyList<ResourceItem> items,
+        Func<ResourceItem, string> promptFactory)
+    {
+        parent.DropDownItems.Clear();
+        parent.Text = items.Count > 0 ? $"{title} ({items.Count})" : title;
+        parent.DropDown.ShowItemToolTips = true;
+
+        if (items.Count == 0)
+        {
+            parent.DropDownItems.Add(new ToolStripMenuItem("(ничего не найдено)")
+            {
+                Enabled = false,
+                ForeColor = Theme.TextMuted,
+            });
+            return;
+        }
+
+        foreach (var item in items)
+        {
+            var entry = new ToolStripMenuItem(item.Name)
+            {
+                ForeColor = Theme.TextPrimary,
+                ToolTipText = item.Summary.Length > 0
+                    ? $"{item.Summary}{Environment.NewLine}{item.Path}"
+                    : item.Path,
+            };
+            entry.Click += (_, _) => this.InsertPrompt(promptFactory(item));
+            parent.DropDownItems.Add(entry);
+        }
+    }
+
+    // A pick fills the input box instead of sending straight away — most entries need the
+    // user to append the actual task before the turn starts.
+    private void InsertPrompt(string prompt)
+    {
+        this.input.Text = prompt;
+        this.input.SelectionStart = this.input.Text.Length;
+        this.input.Focus();
+    }
+
+    // Layout of agents/, skills/ and plugins/: one folder per item, holding a marker file.
+    private static IReadOnlyList<ResourceItem> DiscoverFolders(string root, string markerFile)
+    {
+        return Discover(root, () => Directory
+            .EnumerateDirectories(root)
+            .Select(dir => Path.Combine(dir, markerFile))
+            .Where(File.Exists));
+    }
+
+    private static IReadOnlyList<ResourceItem> DiscoverFiles(string root, string pattern)
+    {
+        return Discover(root, () => Directory.EnumerateFiles(root, pattern));
+    }
+
+    private static IReadOnlyList<ResourceItem> Discover(string root, Func<IEnumerable<string>> enumerate)
+    {
+        if (!Directory.Exists(root))
+        {
+            return [];
+        }
+
+        try
+        {
+            return enumerate()
+                .Select(file => new ResourceItem(
+                    Path.GetExtension(file).Equals(".md", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetFileName(file).Equals("plugin.cs", StringComparison.OrdinalIgnoreCase)
+                        ? Path.GetFileName(Path.GetDirectoryName(file))!  // folder name identifies agents/skills/plugins
+                        : Path.GetFileName(file),
+                    file,
+                    ReadSummary(file)))
+                .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (IOException ex)
+        {
+            Log.Warning(ex, "Resource discovery failed for {Root}", root);
+            return [];
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Warning(ex, "Resource discovery failed for {Root}", root);
+            return [];
+        }
+    }
+
+    // Best-effort one-line summary for the tooltip: the "description:" field of a SKILL.md
+    // front matter, the first prose line of a Markdown document, or the leading //-comment
+    // of a plugin or script source file.
+    private static string ReadSummary(string file)
+    {
+        const string DescriptionKey = "description:";
+
+        try
+        {
+            foreach (var raw in File.ReadLines(file).Take(30))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line == "---" || line.StartsWith('#') ||
+                    line.StartsWith("name:", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (line.StartsWith(DescriptionKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Shorten(line[DescriptionKey.Length..].Trim());
+                }
+
+                if (line.StartsWith("//"))
+                {
+                    return Shorten(line.TrimStart('/').Trim());
+                }
+
+                if (!line.StartsWith("using ") && !line.StartsWith('<') && !line.StartsWith('['))
+                {
+                    return Shorten(line);
+                }
+            }
+        }
+        catch (IOException ex)
+        {
+            Log.Debug(ex, "Resource summary unreadable: {File}", file);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Log.Debug(ex, "Resource summary unreadable: {File}", file);
+        }
+
+        return string.Empty;
+
+        static string Shorten(string text) => text.Length > 160 ? text[..160] + "…" : text;
+    }
+
+    private sealed record ResourceItem(string Name, string Path, string Summary);
 
     // ---- Chat turn ----
 
@@ -612,7 +793,7 @@ public sealed partial class MainForm : Form
         this.modelMenu.DropDownItems.Clear();
         foreach (var name in names)
         {
-            var item = new ToolStripMenuItem(name) { Tag = name, ForeColor = Theme.TextPrimary };
+            var item = new ToolStripMenuItem(name.ToUpper()) { Tag = name, ForeColor = Theme.TextPrimary };
             item.Click += async (_, _) => await this.ApplyModelAsync(name);
             this.modelMenu.DropDownItems.Add(item);
         }
@@ -741,7 +922,7 @@ public sealed partial class MainForm : Form
     /// <summary>Shows the current mode in the menu title and checks it in the dropdown.</summary>
     private void UpdateModeMenu(string mode)
     {
-        this.modeMenu.Text = $"РЕЖИМ: {mode}";
+        this.modeMenu.Text = $"РЕЖИМ: {mode.ToUpper()}";
         foreach (ToolStripItem item in this.modeMenu.DropDownItems)
         {
             if (item is ToolStripMenuItem menuItem && menuItem.Tag is string name)
@@ -783,7 +964,7 @@ public sealed partial class MainForm : Form
         this.modeMenu.Enabled = !busy;
         this.folderMenuItem.Enabled = !busy;
         this.stateLabel.Text = state ?? (busy ? "Агент работает…" : "Готово");
-
+        this.resourcesMenu.Enabled = !busy;
         if (!busy)
         {
             this.FlushOutput(); // show the tail of the answer as soon as the turn ends

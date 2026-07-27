@@ -390,6 +390,10 @@ public sealed class AgentHost : IAsyncDisposable
 
     - Для любой нетривиальной задачи сначала составьте список дел (todo) и пройдите по нему.
     - Сначала читайте, потом пишите: используйте `file_access`/`search_files`, чтобы изучить существующие файлы.
+    - Внешние факты (версии, даты, цены, стандарты, новости, состояние рынка) берите только из
+      `web_search` + `web_fetch` и указывайте URL источника рядом с фактом. Ваши собственные знания
+      устарели — не отвечайте на такие вопросы по памяти. Если веб-инструменты недоступны, прямо
+      скажите об этом и о том, на какой момент актуальны данные, вместо того чтобы называть цифры.
     - Если задача соответствует навыку (SKILL, обнаруженному в skills/), загрузите его и следуйте его сценарию.
     - Показывайте свою работу: включайте выполненные команды/код и ключевые наблюдения.
     - Сохраняйте долговременные выводы в файловую память для следующих сессий.
@@ -432,7 +436,8 @@ public sealed class AgentHost : IAsyncDisposable
       становятся доступны со следующего сообщения. Обновление кода уже загруженного плагина вступает
       в силу только после перезапуска приложения.
     - Примеры уже в папке plugins: `hello-once` (одноразовый инструмент с параметром),
-      `telegram-bot` (резидентный backend Telegram-бота, пересылающий сообщения агенту).
+      `telegram-bot` (резидентный backend Telegram-бота, пересылающий сообщения агенту),
+      `web-search` (резидентный, даёт инструменты `web_search` и `web_fetch` — живой доступ в интернет).
 
     ### Папки agents и skills
 
@@ -520,6 +525,13 @@ public sealed class AgentHost : IAsyncDisposable
                 MaxOutputTokens = this.OutputTokens,
                 Tools = [this.searchFilesTool, this.shellExecutor.AsAIFunction(requireApproval: true), .. this.pluginManager.GetAgentTools()],
                 Reasoning = new() { Effort = ReasoningEffort.Medium },
+
+                // Research/analysis harness: sampling is pinned to greedy decoding. Without these
+                // the endpoint applies the model's own defaults (Ollama: temperature 0.8 / top_p 0.9),
+                // which make the model invent plausible-but-false facts instead of saying "unknown".
+                Temperature = 0f,
+                TopP = 1f,
+                Seed = 0,
             },
         });
     }
@@ -558,6 +570,35 @@ public sealed class AgentHost : IAsyncDisposable
         catch (UnauthorizedAccessException ex) { Log.Warning(ex, "Example script seeding failed"); }
     }
 
+    // Noise filter for search_files: repository/build/dependency folders and binary files.
+    // Without it a single .git or bin\ tree exhausts the match budget with garbage lines
+    // (ReadAllLines over a binary file yields mojibake), so the agent never sees the real
+    // sources and fills the gaps from its own priors.
+    private static readonly string[] SkipDirectories =
+        [".git", ".vs", ".idea", "bin", "obj", "node_modules", ".venv", "packages", "TestResults"];
+
+    private static readonly HashSet<string> SkipExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".exe", ".dll", ".pdb", ".so", ".dylib", ".bin", ".dat", ".cache", ".nupkg",
+        ".zip", ".7z", ".gz", ".tar", ".rar",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz", ".pdf",
+        ".mp3", ".mp4", ".avi", ".mkv", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    };
+
+    private static bool ShouldSkipFile(string root, string file)
+    {
+        if (SkipExtensions.Contains(Path.GetExtension(file)))
+        {
+            return true;
+        }
+
+        var relativeDir = Path.GetDirectoryName(Path.GetRelativePath(root, file));
+        return !string.IsNullOrEmpty(relativeDir)
+            && relativeDir
+                .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Any(segment => SkipDirectories.Contains(segment, StringComparer.OrdinalIgnoreCase));
+    }
+
     // Recursive content search under the working folder (the search_files tool body).
     private static string SearchFiles(string workingDir, string? relativePath, string pattern)
     {
@@ -582,14 +623,19 @@ public sealed class AgentHost : IAsyncDisposable
 
         var regex = new Regex(pattern, RegexOptions.IgnoreCase, TimeSpan.FromSeconds(5));
         var results = new List<string>();
-        const int MaxMatches = 50;
+        const int MaxMatches = 200;
 
         foreach (var file in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
         {
             if (results.Count >= MaxMatches)
             {
-                results.Add("... (обрезано, более 50 совпадений)");
+                results.Add($"... (обрезано, более {MaxMatches} совпадений)");
                 break;
+            }
+
+            if (ShouldSkipFile(root, file))
+            {
+                continue;
             }
 
             try

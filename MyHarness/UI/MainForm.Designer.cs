@@ -31,6 +31,11 @@ partial class MainForm
         System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(MainForm));
         menu = new MenuStrip();
         folderMenuItem = new ToolStripMenuItem();
+        resourcesMenu = new ToolStripMenuItem();
+        agentsMenuItem = new ToolStripMenuItem();
+        skillsMenuItem = new ToolStripMenuItem();
+        pluginsMenuItem = new ToolStripMenuItem();
+        scriptsMenuItem = new ToolStripMenuItem();
         modelMenu = new ToolStripMenuItem();
         modeMenu = new ToolStripMenuItem();
         modeExecuteItem = new ToolStripMenuItem();
@@ -66,10 +71,11 @@ partial class MainForm
         // 
         menu.BackColor = Color.FromArgb(21, 28, 38);
         menu.ForeColor = Color.FromArgb(232, 237, 242);
-        menu.Items.AddRange(new ToolStripItem[] { folderMenuItem, modelMenu, modeMenu });
+        menu.Items.AddRange(new ToolStripItem[] { folderMenuItem, resourcesMenu, modelMenu, modeMenu });
         menu.Location = new Point(0, 0);
         menu.Name = "menu";
         menu.Padding = new Padding(6, 4, 6, 4);
+        menu.ShowItemToolTips = true;
         menu.Size = new Size(1080, 27);
         menu.TabIndex = 0;
         // 
@@ -79,6 +85,42 @@ partial class MainForm
         folderMenuItem.Name = "folderMenuItem";
         folderMenuItem.Size = new Size(96, 19);
         folderMenuItem.Text = "NEW PROJECT";
+        // 
+        // resourcesMenu
+        // 
+        resourcesMenu.DropDownItems.AddRange(new ToolStripItem[] { agentsMenuItem, skillsMenuItem, pluginsMenuItem, scriptsMenuItem });
+        resourcesMenu.ForeColor = Color.FromArgb(232, 237, 242);
+        resourcesMenu.Name = "resourcesMenu";
+        resourcesMenu.Size = new Size(100, 19);
+        resourcesMenu.Text = "РАСШИРЕНИЯ";
+        // 
+        // agentsMenuItem
+        // 
+        agentsMenuItem.ForeColor = Color.FromArgb(232, 237, 242);
+        agentsMenuItem.Name = "agentsMenuItem";
+        agentsMenuItem.Size = new Size(180, 22);
+        agentsMenuItem.Text = "Агенты";
+        // 
+        // skillsMenuItem
+        // 
+        skillsMenuItem.ForeColor = Color.FromArgb(232, 237, 242);
+        skillsMenuItem.Name = "skillsMenuItem";
+        skillsMenuItem.Size = new Size(180, 22);
+        skillsMenuItem.Text = "Навыки (skills)";
+        // 
+        // pluginsMenuItem
+        // 
+        pluginsMenuItem.ForeColor = Color.FromArgb(232, 237, 242);
+        pluginsMenuItem.Name = "pluginsMenuItem";
+        pluginsMenuItem.Size = new Size(180, 22);
+        pluginsMenuItem.Text = "Плагины";
+        // 
+        // scriptsMenuItem
+        // 
+        scriptsMenuItem.ForeColor = Color.FromArgb(232, 237, 242);
+        scriptsMenuItem.Name = "scriptsMenuItem";
+        scriptsMenuItem.Size = new Size(180, 22);
+        scriptsMenuItem.Text = "Скрипты (dotnet)";
         // 
         // modelMenu
         // 
@@ -99,25 +141,25 @@ partial class MainForm
         // 
         modeExecuteItem.ForeColor = Color.FromArgb(232, 237, 242);
         modeExecuteItem.Name = "modeExecuteItem";
-        modeExecuteItem.Size = new Size(166, 22);
+        modeExecuteItem.Size = new Size(181, 22);
         modeExecuteItem.Tag = "execute";
-        modeExecuteItem.Text = "execute";
+        modeExecuteItem.Text = "EXECUTE";
         // 
         // modePlanItem
         // 
         modePlanItem.ForeColor = Color.FromArgb(232, 237, 242);
         modePlanItem.Name = "modePlanItem";
-        modePlanItem.Size = new Size(166, 22);
+        modePlanItem.Size = new Size(181, 22);
         modePlanItem.Tag = "plan";
-        modePlanItem.Text = "plan";
+        modePlanItem.Text = "PLAN";
         // 
         // modeAutoPermItem
         // 
         modeAutoPermItem.CheckOnClick = true;
         modeAutoPermItem.ForeColor = Color.FromArgb(232, 237, 242);
         modeAutoPermItem.Name = "modeAutoPermItem";
-        modeAutoPermItem.Size = new Size(166, 22);
-        modeAutoPermItem.Text = "Auto permissions";
+        modeAutoPermItem.Size = new Size(181, 22);
+        modeAutoPermItem.Text = "AUTO PERMISSIONS";
         // 
         // sidebar
         // 
@@ -261,7 +303,7 @@ partial class MainForm
         // 
         // folderLabel
         // 
-        folderLabel.ForeColor = Color.FromArgb(133, 147, 165);
+        folderLabel.ForeColor = Color.FromArgb(224, 224, 224);
         folderLabel.Name = "folderLabel";
         folderLabel.Size = new Size(0, 17);
         // 
@@ -273,7 +315,7 @@ partial class MainForm
         // 
         // usageLabel
         // 
-        usageLabel.ForeColor = Color.FromArgb(133, 147, 165);
+        usageLabel.ForeColor = Color.FromArgb(224, 224, 224);
         usageLabel.Name = "usageLabel";
         usageLabel.Size = new Size(988, 17);
         usageLabel.Spring = true;
@@ -281,7 +323,7 @@ partial class MainForm
         // 
         // stateLabel
         // 
-        stateLabel.ForeColor = Color.FromArgb(133, 147, 165);
+        stateLabel.ForeColor = Color.FromArgb(224, 224, 224);
         stateLabel.Name = "stateLabel";
         stateLabel.Size = new Size(45, 17);
         stateLabel.Text = "Готово";
@@ -328,6 +370,11 @@ partial class MainForm
     private System.Windows.Forms.ToolStripMenuItem modePlanItem;
     private System.Windows.Forms.ToolStripMenuItem modeAutoPermItem;
     private System.Windows.Forms.ToolStripMenuItem folderMenuItem;
+    private System.Windows.Forms.ToolStripMenuItem resourcesMenu;
+    private System.Windows.Forms.ToolStripMenuItem agentsMenuItem;
+    private System.Windows.Forms.ToolStripMenuItem skillsMenuItem;
+    private System.Windows.Forms.ToolStripMenuItem pluginsMenuItem;
+    private System.Windows.Forms.ToolStripMenuItem scriptsMenuItem;
     private System.Windows.Forms.Panel sidebar;
     private System.Windows.Forms.ListView sessionList;
     private System.Windows.Forms.ColumnHeader sessionColumn;
