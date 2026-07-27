@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="HarnessCli/HarnessCli.csproj" />
   <Project Path="MyHarness/MyHarness.csproj" />
 </Solution>
