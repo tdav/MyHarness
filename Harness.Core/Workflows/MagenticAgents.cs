@@ -1,4 +1,3 @@
-using HyperlightSandbox.Guest.Python;
 using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Hyperlight;
 using Microsoft.Agents.AI.Tools.Shell;
@@ -17,8 +16,11 @@ namespace Harness.Core.Workflows;
 /// Every tool call inside the orchestration is auto-approved. The user already approved the
 /// magentic_codegen call itself, and the loop has no UI to show per-call dialogs — the same
 /// trade-off the plugin channel makes in AgentHost.RunPluginRequestAsync. The safety net
-/// stays structural: the shell deny-list and timeout, file access confined to the working
-/// folder, read-only roles with write tools disabled, and Python inside Hyperlight.
+/// stays structural, and only for files: file access is confined to the working folder, and
+/// "read-only" roles have write tools disabled there. The shell is not part of that net — the
+/// shared LocalShellExecutor has ConfineWorkingDirectory = false, so Tester's shell commands can
+/// still reach outside the working folder; only the deny-list and timeout guard it. Python runs
+/// inside Hyperlight.
 /// </summary>
 internal sealed class MagenticAgents
 {

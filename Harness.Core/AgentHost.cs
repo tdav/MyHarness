@@ -36,10 +36,23 @@ public sealed class AgentHost : IAsyncDisposable
     /// <summary>Tracing source name used when the host app does not supply one.</summary>
     public const string DefaultTracingSourceName = "Harness";
 
+    // Shared between the main agent's shell executor and the orchestration's own one below,
+    // so the two deny-lists cannot drift apart.
+    private static readonly string[] ShellDenyListPatterns =
+    [
+        @"\brm\s+-rf\b",
+        @"\bsudo\b",
+        @":\(\)\s*\{",          // fork-bomb shape
+        @"\bmkfs\b",
+        @">\s*/dev/sd",
+        @"\bFormat-Volume\b",
+    ];
+
     private readonly string tracingSourceName;
     private readonly TracerProvider? tracerProvider;
     private readonly HyperlightCodeActProvider codeAct;
     private readonly LocalShellExecutor shellExecutor;
+    private readonly LocalShellExecutor orchestrationShellExecutor;
     private readonly HttpClient http;
     private readonly OllamaApiClient ollama;
     private readonly string instructions;
@@ -86,6 +99,7 @@ public sealed class AgentHost : IAsyncDisposable
         TracerProvider? tracerProvider,
         HyperlightCodeActProvider codeAct,
         LocalShellExecutor shellExecutor,
+        LocalShellExecutor orchestrationShellExecutor,
         HttpClient http,
         OllamaApiClient ollama)
     {
@@ -99,6 +113,7 @@ public sealed class AgentHost : IAsyncDisposable
         this.tracerProvider = tracerProvider;
         this.codeAct = codeAct;
         this.shellExecutor = shellExecutor;
+        this.orchestrationShellExecutor = orchestrationShellExecutor;
         this.http = http;
         this.ollama = ollama;
         this.pluginManager.PluginsChanged += () => this.pluginToolsDirty = true;
@@ -137,7 +152,9 @@ public sealed class AgentHost : IAsyncDisposable
     /// text answer (the IPluginContext.AskAgentAsync channel). Each plugin keeps its own
     /// persistent session, migrated automatically when the agent instance is rebuilt.
     /// Tool-approval requests are auto-approved: the request comes from an external channel
-    /// (e.g. a Telegram chat) where the host UI's approval dialog cannot be shown.
+    /// (e.g. a Telegram chat) where the host UI's approval dialog cannot be shown. The one
+    /// exception is <see cref="Magentic.ToolName"/>: that orchestration is auto-denied here,
+    /// since it needs the user's own confirmation, not a blanket channel approval.
     /// </summary>
     public async Task<string> RunPluginRequestAsync(string pluginName, string message, CancellationToken cancellationToken)
     {
@@ -188,7 +205,11 @@ public sealed class AgentHost : IAsyncDisposable
                     ? approvals
                         .Select(a => new ChatMessage(
                             ChatRole.User,
-                            [a.CreateResponse(approved: true, reason: "Plugin channel: auto-approved")]))
+                            [a.ToolCall is FunctionCallContent { Name: Magentic.ToolName }
+                                ? a.CreateResponse(
+                                    approved: false,
+                                    reason: "Оркестрация magentic_codegen доступна только из интерфейса приложения — во внешнем канале её нельзя подтвердить.")
+                                : a.CreateResponse(approved: true, reason: "Plugin channel: auto-approved")]))
                         .ToList()
                     : null;
             }
@@ -351,16 +372,20 @@ public sealed class AgentHost : IAsyncDisposable
         {
             WorkingDirectory = workingDir,
             ConfineWorkingDirectory = false,
-            Policy = new ShellPolicy(denyList:
-            [
-                @"\brm\s+-rf\b",
-                @"\bsudo\b",
-                @":\(\)\s*\{",          // fork-bomb shape
-                @"\bmkfs\b",
-                @">\s*/dev/sd",
-                @"\bFormat-Volume\b",
-            ]),
+            Policy = new ShellPolicy(denyList: ShellDenyListPatterns),
             Timeout = TimeSpan.FromSeconds(30),
+        });
+
+        // The Magentic orchestration gets its own executor: same deny-list and working folder,
+        // but a 5-minute timeout — a cold `dotnet build` routinely exceeds the main agent's
+        // 30-second budget, which would make Tester report a false failure and burn rounds on
+        // replans. The main agent keeps its own 30-second executor untouched.
+        var orchestrationShellExecutor = new LocalShellExecutor(new LocalShellExecutorOptions
+        {
+            WorkingDirectory = workingDir,
+            ConfineWorkingDirectory = false,
+            Policy = new ShellPolicy(denyList: ShellDenyListPatterns),
+            Timeout = TimeSpan.FromMinutes(5),
         });
 
         // search_files: local recursive grep over the working folder (replaces hosted web search).
@@ -478,6 +503,7 @@ public sealed class AgentHost : IAsyncDisposable
             tracerProvider,
             codeAct,
             shellExecutor,
+            orchestrationShellExecutor,
             http,
             ollama);
 
@@ -511,11 +537,11 @@ public sealed class AgentHost : IAsyncDisposable
         // Recreated on every rebuild so the orchestration always sees the current token
         // budgets (model switch) and the current plugin tools (hot load).
         var magentic = new Magentic(
-            this.ollama,
+            chatClient,
             this.WorkingDirectory,
             Path.Combine(baseDir, "agent-files"),
             this.codeAct,
-            this.shellExecutor,
+            this.orchestrationShellExecutor,
             this.searchFilesTool,
             () => this.pluginManager.GetAgentTools(),
             this.ContextWindowTokens,
@@ -580,6 +606,7 @@ public sealed class AgentHost : IAsyncDisposable
         await this.pluginManager.DisposeAsync().ConfigureAwait(false);
         this.codeAct.Dispose();
         await this.shellExecutor.DisposeAsync().ConfigureAwait(false);
+        await this.orchestrationShellExecutor.DisposeAsync().ConfigureAwait(false);
         this.http.Dispose();
         this.tracerProvider?.Dispose();
     }

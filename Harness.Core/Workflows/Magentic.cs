@@ -18,6 +18,12 @@ namespace Harness.Core.Workflows;
 /// </summary>
 public sealed class Magentic
 {
+    /// <summary>
+    /// Tool name for AIFunctionFactory.Create below and for gating approval of this specific
+    /// tool in AgentHost.RunPluginRequestAsync — kept as one constant so the two cannot drift apart.
+    /// </summary>
+    public const string ToolName = "magentic_codegen";
+
     /// <summary>Coordination rounds before the manager has to answer with what it has.</summary>
     private const int MaxRounds = 10;
 
@@ -69,7 +75,7 @@ public sealed class Magentic
             ([Description("Задача кодогенерации целиком: что нужно получить, в каких файлах или проекте, чем проверяется результат.")] string task,
              CancellationToken cancellationToken)
                 => this.RunAsync(task, cancellationToken),
-            name: "magentic_codegen",
+            name: ToolName,
             description: "Многоагентная оркестрация Magentic для крупных задач кодогенерации. " +
                          "Архитектор изучает кодовую базу, планировщик строит пошаговый план, " +
                          "затем цикл «кодер → ревьюер → тестировщик» под управлением менеджера " +
@@ -169,52 +175,77 @@ public sealed class Magentic
             .RunStreamingAsync(workflow, new List<ChatMessage> { new(ChatRole.User, brief) }, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
-        await run.TrySendMessageAsync(new TurnToken(emitEvents: true)).ConfigureAwait(false);
+        if (!await run.TrySendMessageAsync(new TurnToken(emitEvents: true)).ConfigureAwait(false))
+        {
+            Log.Error("Magentic: run did not start — TrySendMessageAsync returned false");
+            report.AddSection("Start failed", "Прогон не принял стартовый сигнал (TrySendMessageAsync вернул false) — оркестрация не началась.");
+            return "Оркестрация Magentic не запустилась.";
+        }
 
         var round = 0;
         WorkflowOutputEvent? finalOutput = null;
 
-        await foreach (WorkflowEvent workflowEvent in run.WatchStreamAsync(cancellationToken).ConfigureAwait(false))
+        try
         {
-            switch (workflowEvent)
+            await foreach (WorkflowEvent workflowEvent in run.WatchStreamAsync(cancellationToken).ConfigureAwait(false))
             {
-                case AgentResponseUpdateEvent update:
-                    report.AddSpeakerDelta(update.ExecutorId, update.Update.Text);
-                    break;
+                switch (workflowEvent)
+                {
+                    case AgentResponseUpdateEvent update:
+                        report.AddSpeakerDelta(update.ExecutorId, update.Update.Text);
+                        break;
 
-                case MagenticEvents.MagenticPlanCreatedEvent planCreated:
-                    Log.Information("Magentic: task ledger created");
-                    report.AddSection("Task ledger", planCreated.FullTaskLedger.Text);
-                    break;
+                    case MagenticEvents.MagenticPlanCreatedEvent planCreated:
+                        Log.Information("Magentic: task ledger created");
+                        report.AddSection("Task ledger", planCreated.FullTaskLedger.Text);
+                        break;
 
-                case MagenticEvents.MagenticReplannedEvent replanned:
-                    Log.Warning("Magentic: replanned after a stall");
-                    report.AddSection("Replanned", replanned.FullTaskLedger.Text);
-                    break;
+                    case MagenticEvents.MagenticReplannedEvent replanned:
+                        Log.Warning("Magentic: replanned after a stall");
+                        report.AddSection("Replanned", replanned.FullTaskLedger.Text);
+                        break;
 
-                case MagenticEvents.MagenticProgressLedgerUpdatedEvent progressUpdated:
-                    round++;
-                    Log.Information(
-                        "Magentic round {Round}: next speaker {Speaker}",
-                        round,
-                        progressUpdated.ProgressLedger.NextSpeaker);
-                    report.AddRound(round, progressUpdated.ProgressLedger);
-                    break;
+                    case MagenticEvents.MagenticProgressLedgerUpdatedEvent progressUpdated:
+                        round++;
+                        Log.Information(
+                            "Magentic round {Round}: next speaker {Speaker}",
+                            round,
+                            progressUpdated.ProgressLedger.NextSpeaker);
+                        report.AddRound(round, progressUpdated.ProgressLedger);
+                        break;
 
-                case WorkflowOutputEvent output when output.Is<List<ChatMessage>>():
-                    finalOutput = output;
-                    break;
+                    case WorkflowOutputEvent output when output.Is<List<ChatMessage>>():
+                        finalOutput = output;
+                        break;
 
-                case WorkflowErrorEvent error:
-                    Log.Error(error.Exception, "Magentic workflow error");
-                    report.AddSection("Workflow error", error.Exception?.ToString() ?? "Unknown workflow error.");
-                    break;
+                    case WorkflowOutputEvent unexpected:
+                        Log.Warning(
+                            "Magentic: terminal output was {Type}, not List<ChatMessage> — the tool will report no final answer",
+                            unexpected.Data?.GetType().FullName ?? "null");
+                        break;
 
-                case ExecutorFailedEvent failed:
-                    Log.Error("Magentic executor failed: {Failure}", failed.ToString());
-                    report.AddSection("Executor failed", failed.ToString() ?? "Unknown executor failure.");
-                    break;
+                    case WorkflowErrorEvent error:
+                        Log.Error(error.Exception, "Magentic workflow error");
+                        report.AddSection("Workflow error", error.Exception?.ToString() ?? "Unknown workflow error.");
+                        break;
+
+                    case ExecutorFailedEvent failed:
+                        Log.Error(failed.Data, "Magentic executor {ExecutorId} failed", failed.ExecutorId);
+                        report.AddSection(
+                            "Executor failed",
+                            $"Executor: {failed.ExecutorId}{Environment.NewLine}{Environment.NewLine}{failed.Data?.ToString() ?? "Unknown executor failure."}");
+                        break;
+                }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // WatchStreamAsync's cancellation only stops the event stream (SDK 1.15.0) — it does
+            // not cancel workflow execution. Cancel the run explicitly while it is still in scope
+            // so agents actually stop instead of continuing in the background with auto-approved
+            // tools, then rethrow so RunAsync's outer catch still writes the Cancelled section.
+            await run.CancelRunAsync().ConfigureAwait(false);
+            throw;
         }
 
         var answer = FormatFinalAnswer(finalOutput);

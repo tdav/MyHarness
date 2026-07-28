@@ -20,7 +20,7 @@ internal sealed class MagenticRunReport
         this.filePath = Path.Combine(
             workingDirectory,
             "magentic",
-            $"run-{DateTime.Now:yyyyMMdd-HHmmss}.md");
+            $"run-{DateTime.Now:yyyyMMdd-HHmmss-fff}.md");
 
         this.body
             .AppendLine("# Magentic run")
@@ -37,6 +37,7 @@ internal sealed class MagenticRunReport
     public void AddSection(string title, string content)
     {
         this.currentSpeaker = null;
+        this.EnsureTrailingNewLine();
         this.body
             .AppendLine($"## {title}")
             .AppendLine()
@@ -48,6 +49,7 @@ internal sealed class MagenticRunReport
     public void AddRound(int round, MagenticProgressLedger ledger)
     {
         this.currentSpeaker = null;
+        this.EnsureTrailingNewLine();
         this.body
             .AppendLine($"## Round {round}")
             .AppendLine()
@@ -76,6 +78,18 @@ internal sealed class MagenticRunReport
         }
 
         this.body.Append(text);
+    }
+
+    // AddSpeakerDelta appends raw streamed text with no trailing newline, so a heading written
+    // right after a speaker block would glue onto its last line ("...ответа## Round 3") and
+    // Markdown would not render it as a heading. Called from AddSection/AddRound to close the
+    // previous block before opening a new one.
+    private void EnsureTrailingNewLine()
+    {
+        if (this.body.Length > 0 && this.body[^1] != '\n')
+        {
+            this.body.AppendLine();
+        }
     }
 
     /// <summary>
