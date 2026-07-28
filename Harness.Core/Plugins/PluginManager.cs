@@ -9,7 +9,7 @@ using System.Runtime.Loader;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace HarnessCli.Plugins;
+namespace Harness.Core.Plugins;
 
 /// <summary>
 /// Owns the plugins folder (plugins\ next to the exe): compiles plugin sources with Roslyn

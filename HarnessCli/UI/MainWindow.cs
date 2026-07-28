@@ -1,3 +1,4 @@
+using Harness.Core;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -341,7 +342,7 @@ internal sealed class MainWindow
         this.SetBusy(true, "Инициализация агента…");
         try
         {
-            var host = await AgentHost.CreateAsync(folder).ConfigureAwait(false);
+            var host = await AgentHost.CreateAsync(folder, "HarnessCli").ConfigureAwait(false);
             this.hosts[folder] = host;
 
             // Mirror plugin logs into the chat output (they arrive from background threads).

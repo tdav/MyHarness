@@ -17,50 +17,25 @@
     <ApplicationIcon>images\avg.ico</ApplicationIcon>
   </PropertyGroup>
 
+  <!-- Agent, plugins, tracing, settings and the bundled skills/agents/scripts/plugin
+       examples are shared with HarnessCli; only the WinForms UI lives here. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Harness.Core\Harness.Core.csproj" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Markdig" Version="1.3.2" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
     <PackageReference Include="Microsoft.Agents.AI" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Hyperlight" Version="1.15.0-preview.260722.1" />
-    <PackageReference Include="Microsoft.Agents.AI.Tools.Shell" Version="1.15.0-preview.260722.1" />
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.1" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
-    <PackageReference Include="OpenAI" Version="2.12.0" />
-    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
-    <PackageReference Include="Hyperlight.HyperlightSandbox.Guest.Python" Version="0.5.0" />
-    <PackageReference Include="OllamaSharp" Version="5.4.27" />
     <PackageReference Include="Serilog" Version="4.2.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
   </ItemGroup>
 
-  <!-- Copy skills/ and agents/ to the output directory so runtime lookups against
-       AppContext.BaseDirectory resolve (the working folder itself is user-chosen). -->
+  <!-- scripts\ appears when the project folder itself is chosen as the agent's working
+       folder (seeded examples land there) — never compile those standalone scripts. -->
   <ItemGroup>
-    <Content Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="agents\**\*" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <!-- Example dotnet scripts (standalone .NET 10 file-based programs, run via `dotnet run`).
-       They must NOT be compiled into the app — each has its own top-level statements.
-       AgentHost seeds them into <workingDir>\scripts on first run. -->
-  <ItemGroup>
-    <Compile Remove="dotnet-scripts\**\*.cs" />
-    <Content Include="dotnet-scripts\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <!-- scripts\ appears when the project folder itself is chosen as the agent's working
-         folder (seeded examples land there) — never compile those standalone scripts. -->
     <Compile Remove="scripts\**\*.cs" />
-  </ItemGroup>
-
-  <!-- Example plugins are compiled at runtime by PluginManager (Roslyn), never into the app.
-       They are copied next to the exe as plugins\ — the same folder agent-created plugins
-       land in. (The source folder is named plugin-examples because a plugins\ glob would
-       also match the Plugins\ source folder on the case-insensitive Windows filesystem.) -->
-  <ItemGroup>
-    <Compile Remove="plugin-examples\**\*.cs" />
-    <Content Include="plugin-examples\**\*" CopyToOutputDirectory="PreserveNewest" Link="plugins\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- secret.json holds the Ollama Cloud API key; gitignored, copied to output when present. -->

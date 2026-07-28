@@ -1,3 +1,4 @@
+using Harness.Core;
 using HarnessCli.UI;
 using Serilog;
 using SharpConsoleUI;

@@ -1,6 +1,6 @@
 using Microsoft.Extensions.AI;
 
-namespace HarnessCli.Plugins;
+namespace Harness.Core.Plugins;
 
 /// <summary>
 /// Runtime services available to a plugin: its own folder (for config/state files),

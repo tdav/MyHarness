@@ -10,7 +10,7 @@
 // Bot token is embedded below; can be overridden by token.txt in the plugin folder
 // or the TELEGRAM_BOT_TOKEN environment variable.
 using Microsoft.Extensions.AI;
-using MyHarnessWin.Plugins;
+using Harness.Core.Plugins;
 using System.ComponentModel;
 using System.Net.Http.Headers;
 using System.Text.Json;

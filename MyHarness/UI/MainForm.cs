@@ -1,3 +1,4 @@
+using Harness.Core;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Serilog;
@@ -278,7 +279,7 @@ public sealed partial class MainForm : Form
         this.SetBusy(true, "Инициализация агента…");
         try
         {
-            var host = await Task.Run(() => AgentHost.CreateAsync(folder));
+            var host = await Task.Run(() => AgentHost.CreateAsync(folder, "MyHarness"));
             this.hosts[folder] = host;
 
             // Mirror plugin logs into the chat output (they arrive from background threads).

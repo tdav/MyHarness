@@ -1,3 +1,4 @@
+using Harness.Core;
 using MyHarnessWin.UI;
 using Serilog;
 

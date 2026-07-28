@@ -12,17 +12,17 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using HarnessCli.Plugins;
-using HarnessCli.Tracing;
+using Harness.Core.Plugins;
+using Harness.Core.Tracing;
 
-namespace HarnessCli;
+namespace Harness.Core;
 
 /// <summary>
 /// Builds and owns the ReAct harness agent (Ollama Cloud backend) together with all of its
 /// disposable infrastructure: the Hyperlight Python sandbox, the local shell executor
 /// (child PowerShell processes rooted at the user-selected working folder), the HTTP client
-/// and the OpenTelemetry tracer. The Terminal.Gui UI talks only to <see cref="Agent"/>.
-/// Mirrors the agent setup of the MyHarness WinForms app; only the UI layer differs.
+/// and the OpenTelemetry tracer. A host UI (WinForms, console, …) talks only to
+/// <see cref="Agent"/>; everything below this type is UI-agnostic.
 /// </summary>
 public sealed class AgentHost : IAsyncDisposable
 {
@@ -32,8 +32,10 @@ public sealed class AgentHost : IAsyncDisposable
     /// <summary>Upper bound for the output-token budget; shrinks for small-context models.</summary>
     public const int MaxOutputTokens = 16_384;
 
-    private const string TracingSourceName = "HarnessCli";
+    /// <summary>Tracing source name used when the host app does not supply one.</summary>
+    public const string DefaultTracingSourceName = "Harness";
 
+    private readonly string tracingSourceName;
     private readonly TracerProvider? tracerProvider;
     private readonly HyperlightCodeActProvider codeAct;
     private readonly LocalShellExecutor shellExecutor;
@@ -79,6 +81,7 @@ public sealed class AgentHost : IAsyncDisposable
         string instructions,
         AIFunction searchFilesTool,
         PluginManager pluginManager,
+        string tracingSourceName,
         TracerProvider? tracerProvider,
         HyperlightCodeActProvider codeAct,
         LocalShellExecutor shellExecutor,
@@ -86,6 +89,7 @@ public sealed class AgentHost : IAsyncDisposable
         OllamaApiClient ollama)
     {
         this.WorkingDirectory = workingDirectory;
+        this.tracingSourceName = tracingSourceName;
         this.ModelName = modelName;
         this.ContextWindowTokens = contextWindowTokens;
         this.instructions = instructions;
@@ -132,7 +136,7 @@ public sealed class AgentHost : IAsyncDisposable
     /// text answer (the IPluginContext.AskAgentAsync channel). Each plugin keeps its own
     /// persistent session, migrated automatically when the agent instance is rebuilt.
     /// Tool-approval requests are auto-approved: the request comes from an external channel
-    /// (e.g. a Telegram chat) where the WinForms approval dialog cannot be shown.
+    /// (e.g. a Telegram chat) where the host UI's approval dialog cannot be shown.
     /// </summary>
     public async Task<string> RunPluginRequestAsync(string pluginName, string message, CancellationToken cancellationToken)
     {
@@ -306,8 +310,12 @@ public sealed class AgentHost : IAsyncDisposable
     /// Creates the agent rooted at <paramref name="workingDir"/>.
     /// Backend config comes from secret.json (gitignored); env vars override secret.json if set.
     /// The context window is queried from the endpoint for the configured model.
+    /// <paramref name="tracingSourceName"/> names the OpenTelemetry activity source so traces
+    /// of the different host apps stay distinguishable.
     /// </summary>
-    public static async Task<AgentHost> CreateAsync(string workingDir)
+    public static async Task<AgentHost> CreateAsync(
+        string workingDir,
+        string tracingSourceName = DefaultTracingSourceName)
     {
         var secret = LoadOllamaSecret(Path.Combine(AppContext.BaseDirectory, "secret.json"));
         var endpoint = Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT") ?? secret.Endpoint;
@@ -329,7 +337,7 @@ public sealed class AgentHost : IAsyncDisposable
         Directory.CreateDirectory(scriptsDir);
         SeedExampleScripts(Path.Combine(baseDir, "dotnet-scripts"), scriptsDir);
 
-        var tracerProvider = HarnessTracing.CreateFileTracerProvider(TracingSourceName);
+        var tracerProvider = HarnessTracing.CreateFileTracerProvider(tracingSourceName);
 
         // Plugins live next to the exe (like skills/ and agents/); they are loaded after the
         // host exists so the AskAgentAsync channel works from the very first plugin start.
@@ -422,7 +430,7 @@ public sealed class AgentHost : IAsyncDisposable
     - Инструменты: `plugin_create(name, sourceCode)` — создать/обновить, скомпилировать и сразу загрузить
       плагин; `plugin_load(name)` — загрузить плагин из существующей папки без перезапуска;
       `plugin_list()` — список плагинов.
-    - Контракт (namespace `HarnessCli.Plugins`):
+    - Контракт (namespace `Harness.Core.Plugins`):
       `IHarnessPlugin` — свойства `string Name`, `string Description`;
       `IOneShotPlugin : IHarnessPlugin` — `Delegate CreateHandler(IPluginContext)`;
       `IResidentPlugin : IHarnessPlugin` — `IReadOnlyList<AIFunction> GetTools()` и `Task StartAsync(IPluginContext, CancellationToken)`;
@@ -458,6 +466,7 @@ public sealed class AgentHost : IAsyncDisposable
             instructions,
             searchFilesTool,
             pluginManager,
+            tracingSourceName,
             tracerProvider,
             codeAct,
             shellExecutor,
@@ -497,7 +506,7 @@ public sealed class AgentHost : IAsyncDisposable
             MaxOutputTokens = this.OutputTokens,
             Name = "ReActAgent",
             Description = "ReAct-агент с доступом к файлам, локальным поиском, оболочкой, выполнением кода, навыками и OpenTelemetry.",
-            OpenTelemetrySourceName = TracingSourceName,
+            OpenTelemetrySourceName = this.tracingSourceName,
 
             // FileMemory: persistent notes across sessions.
             FileMemoryStore = new FileSystemAgentFileStore(Path.Combine(baseDir, "agent-files")),

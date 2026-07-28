@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Harness.Core</RootNamespace>
+    <AssemblyName>Harness.Core</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Harness providers and samples use experimental APIs. -->
+    <NoWarn>$(NoWarn);OPENAI001;MAAI001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.15.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.15.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.15.0" />
+    <PackageReference Include="Microsoft.Agents.AI.Hyperlight" Version="1.15.0-preview.260722.1" />
+    <PackageReference Include="Microsoft.Agents.AI.Tools.Shell" Version="1.15.0-preview.260722.1" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.1" />
+    <PackageReference Include="OpenAI" Version="2.12.0" />
+    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
+    <PackageReference Include="Hyperlight.HyperlightSandbox.Guest.Python" Version="0.5.0" />
+    <PackageReference Include="OllamaSharp" Version="5.4.27" />
+    <PackageReference Include="Serilog" Version="4.2.0" />
+  </ItemGroup>
+
+  <!-- skills/ and agents/ ship with the library and flow into every host app's output
+       directory, where runtime lookups against AppContext.BaseDirectory resolve them
+       (the working folder itself is user-chosen). -->
+  <ItemGroup>
+    <Content Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="agents\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Example dotnet scripts (standalone .NET 10 file-based programs, run via `dotnet run`).
+       They must NOT be compiled into the library — each has its own top-level statements.
+       AgentHost seeds them into <workingDir>\scripts on first run. -->
+  <ItemGroup>
+    <Compile Remove="dotnet-scripts\**\*.cs" />
+    <Content Include="dotnet-scripts\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Example plugins are compiled at runtime by PluginManager (Roslyn), never into the
+       library. They are copied next to the host exe as plugins\ — the same folder
+       agent-created plugins land in. (The source folder is named plugin-examples because a
+       plugins\ glob would also match the Plugins\ source folder on the case-insensitive
+       Windows filesystem.) -->
+  <ItemGroup>
+    <Compile Remove="plugin-examples\**\*.cs" />
+    <Content Include="plugin-examples\**\*" CopyToOutputDirectory="PreserveNewest" Link="plugins\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

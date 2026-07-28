@@ -1,7 +1,7 @@
 // Example one-shot plugin (type 1): becomes an agent tool (AIFunction). The delegate
 // returned by CreateHandler runs once per tool call; its [Description]-annotated
 // parameters form the tool's parameter schema.
-using HarnessCli.Plugins;
+using Harness.Core.Plugins;
 using System.ComponentModel;
 
 public sealed class HelloOncePlugin : IOneShotPlugin

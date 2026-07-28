@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using OpenTelemetry;
 
-namespace HarnessCli.Tracing;
+namespace Harness.Core.Tracing;
 
 /// <summary>
 /// A simple OpenTelemetry span exporter that writes completed activities (spans) to a text file.

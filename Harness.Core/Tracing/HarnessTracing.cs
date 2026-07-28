@@ -5,7 +5,7 @@
 using OpenTelemetry;
 using OpenTelemetry.Trace;
 
-namespace HarnessCli.Tracing;
+namespace Harness.Core.Tracing;
 
 /// <summary>
 /// Provides factory methods for creating pre-configured OpenTelemetry tracing for harness samples.

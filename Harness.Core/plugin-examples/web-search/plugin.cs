@@ -11,7 +11,7 @@
 // folder, or the TAVILY_API_KEY environment variable), otherwise the key-less
 // DuckDuckGo Lite endpoint.
 using Microsoft.Extensions.AI;
-using HarnessCli.Plugins;
+using Harness.Core.Plugins;
 using System.ComponentModel;
 using System.Net;
 using System.Text;
