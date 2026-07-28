@@ -33,6 +33,9 @@ public sealed class AgentHost : IAsyncDisposable
     /// <summary>Upper bound for the output-token budget; shrinks for small-context models.</summary>
     public const int MaxOutputTokens = 16_384;
 
+    /// <summary>Maximum number of tool-approval rounds in a plugin-channel request to prevent infinite loops.</summary>
+    public const int MaxApprovalRounds = 5;
+
     /// <summary>Tracing source name used when the host app does not supply one.</summary>
     public const string DefaultTracingSourceName = "Harness";
 
@@ -180,7 +183,8 @@ public sealed class AgentHost : IAsyncDisposable
 
             var answer = new StringBuilder();
             IList<ChatMessage>? next = [new ChatMessage(ChatRole.User, message)];
-            while (next is not null)
+            int approvalRound = 0;
+            while (next is not null && approvalRound < MaxApprovalRounds)
             {
                 var approvals = new List<ToolApprovalRequestContent>();
                 answer.Clear(); // Only the text produced after the last approval round is the answer.
@@ -212,6 +216,16 @@ public sealed class AgentHost : IAsyncDisposable
                                 : a.CreateResponse(approved: true, reason: "Plugin channel: auto-approved")]))
                         .ToList()
                     : null;
+
+                if (next is not null)
+                {
+                    approvalRound++;
+                }
+            }
+
+            if (approvalRound >= MaxApprovalRounds && next is not null)
+            {
+                return "Запрос прерван: слишком большое число раундов подтверждения инструментов. Пожалуйста, обратитесь к администратору.";
             }
 
             this.pluginSessions[pluginName] = (agent, session);

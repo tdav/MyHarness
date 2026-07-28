@@ -18,7 +18,7 @@ namespace Harness.Core.Workflows;
 /// trade-off the plugin channel makes in AgentHost.RunPluginRequestAsync. The safety net
 /// stays structural, and only for files: file access is confined to the working folder, and
 /// "read-only" roles have write tools disabled there. The shell is not part of that net — the
-/// shared LocalShellExecutor has ConfineWorkingDirectory = false, so Tester's shell commands can
+/// orchestration's LocalShellExecutor has ConfineWorkingDirectory = false, so Tester's shell commands can
 /// still reach outside the working folder; only the deny-list and timeout guard it. Python runs
 /// inside Hyperlight.
 /// </summary>

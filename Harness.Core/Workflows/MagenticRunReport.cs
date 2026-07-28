@@ -6,7 +6,7 @@ namespace Harness.Core.Workflows;
 
 /// <summary>
 /// Accumulates the Markdown transcript of a single Magentic run and writes it to
-/// &lt;workingDir&gt;\magentic\run-yyyyMMdd-HHmmss.md. The file is written once, at the end
+/// &lt;workingDir&gt;\magentic\run-yyyyMMdd-HHmmss-fff.md. The file is written once, at the end
 /// of the run — including cancelled and failed runs, so a broken run stays diagnosable.
 /// </summary>
 internal sealed class MagenticRunReport
@@ -83,10 +83,15 @@ internal sealed class MagenticRunReport
     // AddSpeakerDelta appends raw streamed text with no trailing newline, so a heading written
     // right after a speaker block would glue onto its last line ("...ответа## Round 3") and
     // Markdown would not render it as a heading. Called from AddSection/AddRound to close the
-    // previous block before opening a new one.
+    // previous block before opening a new one. Ensure blank line before heading for proper Markdown rendering.
     private void EnsureTrailingNewLine()
     {
         if (this.body.Length > 0 && this.body[^1] != '\n')
+        {
+            this.body.AppendLine();
+        }
+
+        if (this.body.Length > 1 && this.body[^1] == '\n' && this.body[^2] != '\n')
         {
             this.body.AppendLine();
         }
