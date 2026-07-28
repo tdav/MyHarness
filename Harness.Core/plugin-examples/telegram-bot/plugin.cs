@@ -12,12 +12,13 @@
 using Microsoft.Extensions.AI;
 using Harness.Core.Plugins;
 using System.ComponentModel;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
 public sealed class TelegramBotPlugin : IResidentPlugin
 {
-    private const string BotToken = "8853258810:AAH7seasB8MKgvEqQIKf_hu93DfPR4FsMI8";
+    private const string BotToken = "8853258810:AAHhDN62tIoty1VM1CEC_RS3VtLaIbDscgE";
     private const int TelegramMessageLimit = 4000; // API hard limit is 4096.
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(120) };
@@ -77,6 +78,22 @@ public sealed class TelegramBotPlugin : IResidentPlugin
         }
 
         this.apiBase = $"https://api.telegram.org/bot{token}";
+
+        // Long polling and webhooks are mutually exclusive: a webhook left over from an earlier
+        // setup makes every getUpdates call fail with 409 Conflict. Removing it is idempotent,
+        // so it is safe to do on every start.
+        try
+        {
+            await this.http.GetStringAsync($"{this.apiBase}/deleteWebhook", cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            context.Log($"Не удалось снять webhook: {ex.Message}");
+        }
 
         // Verify the token by calling getMe.
         try
@@ -152,7 +169,13 @@ public sealed class TelegramBotPlugin : IResidentPlugin
             }
             catch (Exception ex)
             {
-                context.Log($"Ошибка опроса: {ex.Message}");
+                // 409 means someone else already holds getUpdates for this token: a second copy
+                // of the app, a previous process that has not exited yet, or a webhook that was
+                // set after startup. Retrying keeps the bot alive once the conflict is gone.
+                context.Log(ex is HttpRequestException { StatusCode: HttpStatusCode.Conflict }
+                    ? "Конфликт опроса (409): этого бота уже опрашивает другой процесс. " +
+                      "Оставьте один запущенный экземпляр приложения — опрос возобновится сам."
+                    : $"Ошибка опроса: {ex.Message}");
                 try
                 {
                     await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
