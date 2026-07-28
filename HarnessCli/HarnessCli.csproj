@@ -1,87 +1,68 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <RootNamespace>HarnessCli</RootNamespace>
-    <AssemblyName>HarnessCli</AssemblyName>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <!-- Harness providers and samples use experimental APIs. -->
-    <NoWarn>$(NoWarn);OPENAI001;MAAI001</NoWarn>
-    <!-- SharpConsoleUI drives the console itself; the app must not be a Windows subsystem app. -->
-    <InvariantGlobalization>false</InvariantGlobalization>
-  </PropertyGroup>
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<RootNamespace>HarnessCli</RootNamespace>
+		<AssemblyName>HarnessCli</AssemblyName>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<!-- Harness providers and samples use experimental APIs. -->
+		<NoWarn>$(NoWarn);OPENAI001;MAAI001</NoWarn>
+		<!-- SharpConsoleUI drives the console itself; the app must not be a Windows subsystem app. -->
+		<InvariantGlobalization>false</InvariantGlobalization>
+		<SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+	</PropertyGroup>
 
-  <!-- NativeAOT. `dotnet publish -r win-x64` produces a single native exe; a plain
-       `dotnet build` stays on the JIT, so day-to-day development is unaffected.
-       The native link step needs the MSVC toolchain: publish from a Developer
-       Command Prompt, or put the VS Installer folder (vswhere.exe) on PATH. -->
-  <PropertyGroup>
-    <PublishAot>true</PublishAot>
-    <InvariantTimezone>false</InvariantTimezone>
 
-    <!-- The agent stack (Microsoft.Agents.AI, OpenAI, OllamaSharp) serializes hundreds of
-         protocol types through System.Text.Json's reflection resolver; source-generating
-         contexts for third-party models is not possible from here. Keeping the reflection
-         resolver alive is what makes those libraries work under AOT — trimming is therefore
-         restricted to whole unused assemblies so no member of a live type is removed. -->
-    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
-    <TrimMode>partial</TrimMode>
+	<ItemGroup>
+		<PackageReference Include="SharpConsoleUI" Version="2.5.14" />
+		<PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+		<PackageReference Include="Microsoft.Agents.AI" Version="1.15.0" />
+		<PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.15.0" />
+		<PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.15.0" />
+		<PackageReference Include="Microsoft.Agents.AI.Hyperlight" Version="1.15.0-preview.260722.1" />
+		<PackageReference Include="Microsoft.Agents.AI.Tools.Shell" Version="1.15.0-preview.260722.1" />
+		<PackageReference Include="Microsoft.Extensions.AI" Version="10.8.1" />
+		<PackageReference Include="OpenAI" Version="2.12.0" />
+		<PackageReference Include="OpenTelemetry" Version="1.17.0" />
+		<PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
+		<PackageReference Include="Hyperlight.HyperlightSandbox.Guest.Python" Version="0.5.0" />
+		<PackageReference Include="OllamaSharp" Version="5.4.27" />
+		<PackageReference Include="Serilog" Version="4.2.0" />
+		<PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+	</ItemGroup>
 
-    <!-- Trim/AOT warnings from the dependency graph are reported but not fatal: the
-         reflection paths they flag are covered by the two settings above. -->
-    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="SharpConsoleUI" Version="2.5.14" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <PackageReference Include="Microsoft.Agents.AI" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Harness" Version="1.15.0" />
-    <PackageReference Include="Microsoft.Agents.AI.Hyperlight" Version="1.15.0-preview.260722.1" />
-    <PackageReference Include="Microsoft.Agents.AI.Tools.Shell" Version="1.15.0-preview.260722.1" />
-    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.1" />
-    <PackageReference Include="OpenAI" Version="2.12.0" />
-    <PackageReference Include="OpenTelemetry" Version="1.17.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.17.0" />
-    <PackageReference Include="Hyperlight.HyperlightSandbox.Guest.Python" Version="0.5.0" />
-    <PackageReference Include="OllamaSharp" Version="5.4.27" />
-    <PackageReference Include="Serilog" Version="4.2.0" />
-    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
-  </ItemGroup>
-
-  <!-- Copy skills/ and agents/ to the output directory so runtime lookups against
+	<!-- Copy skills/ and agents/ to the output directory so runtime lookups against
        AppContext.BaseDirectory resolve (the working folder itself is user-chosen). -->
-  <ItemGroup>
-    <Content Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="agents\**\*" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
+	<ItemGroup>
+		<Content Include="skills\**\*" CopyToOutputDirectory="PreserveNewest" />
+		<Content Include="agents\**\*" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
 
-  <!-- Example dotnet scripts (standalone .NET 10 file-based programs, run via `dotnet run`).
+	<!-- Example dotnet scripts (standalone .NET 10 file-based programs, run via `dotnet run`).
        They must NOT be compiled into the app — each has its own top-level statements.
        AgentHost seeds them into <workingDir>\scripts on first run. -->
-  <ItemGroup>
-    <Compile Remove="dotnet-scripts\**\*.cs" />
-    <Content Include="dotnet-scripts\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <!-- scripts\ appears when the project folder itself is chosen as the agent's working
+	<ItemGroup>
+		<Compile Remove="dotnet-scripts\**\*.cs" />
+		<Content Include="dotnet-scripts\**\*" CopyToOutputDirectory="PreserveNewest" />
+		<!-- scripts\ appears when the project folder itself is chosen as the agent's working
          folder (seeded examples land there) — never compile those standalone scripts. -->
-    <Compile Remove="scripts\**\*.cs" />
-  </ItemGroup>
+		<Compile Remove="scripts\**\*.cs" />
+	</ItemGroup>
 
-  <!-- Example plugins are compiled at runtime by PluginManager (Roslyn), never into the app.
+	<!-- Example plugins are compiled at runtime by PluginManager (Roslyn), never into the app.
        They are copied next to the exe as plugins\ — the same folder agent-created plugins
        land in. (The source folder is named plugin-examples because a plugins\ glob would
        also match the Plugins\ source folder on the case-insensitive Windows filesystem.) -->
-  <ItemGroup>
-    <Compile Remove="plugin-examples\**\*.cs" />
-    <Content Include="plugin-examples\**\*" CopyToOutputDirectory="PreserveNewest" Link="plugins\%(RecursiveDir)%(Filename)%(Extension)" />
-  </ItemGroup>
+	<ItemGroup>
+		<Compile Remove="plugin-examples\**\*.cs" />
+		<Content Include="plugin-examples\**\*" CopyToOutputDirectory="PreserveNewest" Link="plugins\%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
 
-  <!-- secret.json holds the Ollama Cloud API key; gitignored, copied to output when present. -->
-  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\secret.json')">
-    <Content Include="secret.json" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
+	<!-- secret.json holds the Ollama Cloud API key; gitignored, copied to output when present. -->
+	<ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\secret.json')">
+		<Content Include="secret.json" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
 
 </Project>

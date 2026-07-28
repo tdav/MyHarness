@@ -13,6 +13,12 @@ public interface IPluginContext
     string PluginDirectory { get; }
 
     /// <summary>
+    /// Gets the session's working folder. Plugins that read or send files out of the process
+    /// (e.g. the Telegram bot) must confine themselves to this folder.
+    /// </summary>
+    string WorkingDirectory { get; }
+
+    /// <summary>
     /// Appends a timestamped line to plugin.log in the plugin folder and shows it in the
     /// chat output of the main window.
     /// </summary>

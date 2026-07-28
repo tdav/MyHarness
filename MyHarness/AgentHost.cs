@@ -333,7 +333,7 @@ public sealed class AgentHost : IAsyncDisposable
 
         // Plugins live next to the exe (like skills/ and agents/); they are loaded after the
         // host exists so the AskAgentAsync channel works from the very first plugin start.
-        var pluginManager = new PluginManager(Path.Combine(baseDir, "plugins"));
+        var pluginManager = new PluginManager(Path.Combine(baseDir, "plugins"), workingDir);
 
         var codeAct = new HyperlightCodeActProvider(
             HyperlightCodeActProviderOptions.CreateForWasm(PythonGuestModule.GetModulePath()));
@@ -426,7 +426,8 @@ public sealed class AgentHost : IAsyncDisposable
       `IHarnessPlugin` — свойства `string Name`, `string Description`;
       `IOneShotPlugin : IHarnessPlugin` — `Delegate CreateHandler(IPluginContext)`;
       `IResidentPlugin : IHarnessPlugin` — `IReadOnlyList<AIFunction> GetTools()` и `Task StartAsync(IPluginContext, CancellationToken)`;
-      `IPluginContext` — `string PluginDirectory`, `void Log(string)` (пишет в plugin.log и в чат),
+      `IPluginContext` — `string PluginDirectory`, `string WorkingDirectory` (рабочая папка сессии;
+      плагин, отдающий файлы наружу, обязан ограничиваться ею), `void Log(string)` (пишет в plugin.log и в чат),
       `Task<string> AskAgentAsync(string, CancellationToken)` — передать запрос пользователя агенту
       и получить его ответ (так, например, Telegram-бот пересылает входящие сообщения агенту).
     - Стандартные using (System, System.IO, System.Linq, System.Net.Http, System.Threading.Tasks и т.п.)

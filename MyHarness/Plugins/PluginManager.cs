@@ -53,9 +53,13 @@ public sealed class PluginManager : IAsyncDisposable
     /// <summary>Gets the root folder that holds one subfolder per plugin.</summary>
     public string PluginsDirectory { get; }
 
-    public PluginManager(string pluginsDirectory)
+    /// <summary>Gets the session's working folder, handed to plugins via IPluginContext.</summary>
+    public string WorkingDirectory { get; }
+
+    public PluginManager(string pluginsDirectory, string workingDirectory)
     {
         this.PluginsDirectory = pluginsDirectory;
+        this.WorkingDirectory = workingDirectory;
         Directory.CreateDirectory(pluginsDirectory);
     }
 
@@ -420,6 +424,8 @@ public sealed class PluginManager : IAsyncDisposable
     private sealed class PluginContext(PluginManager owner, string pluginDirectory) : IPluginContext
     {
         public string PluginDirectory { get; } = pluginDirectory;
+
+        public string WorkingDirectory => owner.WorkingDirectory;
 
         private string PluginName => Path.GetFileName(this.PluginDirectory);
 
