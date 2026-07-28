@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Harness.Core.Plugins;
 using Harness.Core.Tracing;
+using Harness.Core.Workflows;
 
 namespace Harness.Core;
 
@@ -393,6 +394,13 @@ public sealed class AgentHost : IAsyncDisposable
       читать документы-персоны (например, `Get-Content "{Path.Combine(baseDir, "agents", "researcher", "AGENTS.md")}"`).
     - `execute_code` — пишите и запускайте Python в песочнице, чтобы вычислить или проверить результат.
       Предпочитайте запуск кода рассуждениям о том, что произошло бы.
+    - `magentic_codegen` — многоагентная оркестрация для крупных задач кодогенерации: архитектор
+      изучает кодовую базу, планировщик строит пошаговый план, затем цикл «кодер → ревьюер →
+      тестировщик» выполняет его под управлением менеджера. Запускайте её для задач в несколько
+      файлов или требующих проверки сборкой и тестами; мелкие правки делайте сами через
+      `file_access` и `run_shell`. Внутри оркестрации подтверждения не запрашиваются —
+      пользователь подтверждает только сам вызов. Отчёт о запуске сохраняется в
+      `{Path.Combine(workingDir, "magentic")}`.
 
     ### Стиль работы
 
@@ -500,6 +508,20 @@ public sealed class AgentHost : IAsyncDisposable
         var baseDir = AppContext.BaseDirectory;
         IChatClient chatClient = this.ollama;
 
+        // Recreated on every rebuild so the orchestration always sees the current token
+        // budgets (model switch) and the current plugin tools (hot load).
+        var magentic = new Magentic(
+            this.ollama,
+            this.WorkingDirectory,
+            Path.Combine(baseDir, "agent-files"),
+            this.codeAct,
+            this.shellExecutor,
+            this.searchFilesTool,
+            () => this.pluginManager.GetAgentTools(),
+            this.ContextWindowTokens,
+            this.OutputTokens,
+            this.tracingSourceName);
+
         return chatClient.AsHarnessAgent(new HarnessAgentOptions
         {
             MaxContextWindowTokens = this.ContextWindowTokens,
@@ -533,7 +555,13 @@ public sealed class AgentHost : IAsyncDisposable
             {
                 Instructions = this.instructions,
                 MaxOutputTokens = this.OutputTokens,
-                Tools = [this.searchFilesTool, this.shellExecutor.AsAIFunction(requireApproval: true), .. this.pluginManager.GetAgentTools()],
+                Tools =
+                [
+                    this.searchFilesTool,
+                    this.shellExecutor.AsAIFunction(requireApproval: true),
+                    magentic.AsAIFunction(),
+                    .. this.pluginManager.GetAgentTools(),
+                ],
                 Reasoning = new() { Effort = ReasoningEffort.Medium },
 
                 // Research/analysis harness: sampling is pinned to greedy decoding. Without these
