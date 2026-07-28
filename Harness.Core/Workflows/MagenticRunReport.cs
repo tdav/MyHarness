@@ -79,7 +79,7 @@ internal sealed class MagenticRunReport
     }
 
     /// <summary>
-    /// Writes the report to disk. Never throws: a failed write is logged and reported back
+    /// Writes the report to disk. Never throws: any write failure is logged and reported back
     /// as text, because losing the report must not lose the run's result.
     /// </summary>
     public string Save()
@@ -90,7 +90,7 @@ internal sealed class MagenticRunReport
             File.WriteAllText(this.filePath, this.body.ToString());
             return this.filePath;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex)
         {
             Log.Warning(ex, "Magentic: failed to write the run report to {Path}", this.filePath);
             return $"(отчёт не удалось записать: {ex.Message})";
