@@ -4,6 +4,7 @@ using Microsoft.Extensions.AI;
 using Serilog;
 using System.ComponentModel;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -22,6 +23,18 @@ namespace HarnessCli.Plugins;
 /// </summary>
 public sealed class PluginManager : IAsyncDisposable
 {
+    /// <summary>
+    /// Whether plugins can work at all in this build. A plugin is C# source compiled by
+    /// Roslyn at runtime and loaded from memory — both need a JIT, which the NativeAOT
+    /// build does not have. The rest of the app is unaffected, so instead of failing the
+    /// startup the plugin surface simply disappears there.
+    /// </summary>
+    private static bool PluginsSupported => RuntimeFeature.IsDynamicCodeSupported;
+
+    private const string UnsupportedMessage =
+        "плагины недоступны в NativeAOT-сборке: компиляция и загрузка кода во время работы " +
+        "требуют JIT. Запустите обычную (JIT) сборку, чтобы пользоваться плагинами.";
+
     private static readonly Regex PluginNamePattern = new("^[A-Za-z0-9_-]+$", RegexOptions.Compiled);
     private static readonly Lazy<IReadOnlyList<MetadataReference>> References = new(BuildReferences);
 
@@ -78,6 +91,12 @@ public sealed class PluginManager : IAsyncDisposable
     /// </summary>
     public void LoadPlugins()
     {
+        if (!PluginsSupported)
+        {
+            Log.Information("Plugin loading skipped: the AOT build cannot compile or load assemblies at runtime");
+            return;
+        }
+
         foreach (var dir in Directory.EnumerateDirectories(this.PluginsDirectory))
         {
             try
@@ -127,23 +146,30 @@ public sealed class PluginManager : IAsyncDisposable
         List<AITool> tools =
         [
             AIFunctionFactory.Create(
+                () => this.ListPlugins(),
+                name: "plugin_list",
+                description: "Список плагинов: папки в plugins\\, загруженные одноразовые инструменты и резидентные плагины."),
+        ];
+
+        // Authoring tools are offered only where they can actually run — in the AOT build
+        // they would fail on every call, and an unusable tool in the schema is worse than
+        // no tool at all.
+        if (PluginsSupported)
+        {
+            tools.Add(AIFunctionFactory.Create(
                 ([Description("Имя плагина: латиница, цифры, '-' и '_'.")] string name,
                  [Description("Полный исходный код плагина (один .cs-файл).")] string sourceCode) =>
                     this.CreatePlugin(name, sourceCode),
                 name: "plugin_create",
                 description: "Создать или обновить плагин: сохраняет исходник в plugins\\<имя>\\plugin.cs, компилирует " +
                              "и сразу загружает его (одноразовый плагин становится инструментом агента с параметрами, " +
-                             "резидентный — запускается)."),
-            AIFunctionFactory.Create(
+                             "резидентный — запускается)."));
+            tools.Add(AIFunctionFactory.Create(
                 ([Description("Имя плагина (папка внутри plugins).")] string name) => this.LoadPlugin(name),
                 name: "plugin_load",
                 description: "Загрузить плагин в работающее приложение без перезапуска. Плагины, созданные через " +
-                             "plugin_create, загружаются автоматически — этот инструмент нужен для папок, добавленных вручную."),
-            AIFunctionFactory.Create(
-                () => this.ListPlugins(),
-                name: "plugin_list",
-                description: "Список плагинов: папки в plugins\\, загруженные одноразовые инструменты и резидентные плагины."),
-        ];
+                             "plugin_create, загружаются автоматически — этот инструмент нужен для папок, добавленных вручную."));
+        }
 
         lock (this.sync)
         {
@@ -207,6 +233,12 @@ public sealed class PluginManager : IAsyncDisposable
 
         sb.AppendLine($"Папка плагинов: {this.PluginsDirectory}");
         sb.AppendLine(dirs.Count == 0 ? "Плагинов нет." : $"Папки плагинов: {string.Join(", ", dirs.Select(Path.GetFileName))}");
+
+        if (!PluginsSupported)
+        {
+            sb.AppendLine($"Внимание: {UnsupportedMessage}");
+            return sb.ToString();
+        }
 
         List<AIFunction> oneShots;
         List<(IResidentPlugin Plugin, Task RunTask)> loaded;
@@ -324,6 +356,11 @@ public sealed class PluginManager : IAsyncDisposable
     // collectible AssemblyLoadContext. Returns (null, null, errors) on failure.
     private static (Assembly? Assembly, AssemblyLoadContext? Alc, string Errors) Compile(string pluginDir)
     {
+        if (!PluginsSupported)
+        {
+            return (null, null, UnsupportedMessage);
+        }
+
         var sources = Directory.GetFiles(pluginDir, "*.cs");
         if (sources.Length == 0)
         {

@@ -1,27 +1,32 @@
-using System.Collections.ObjectModel;
 using System.Text.Json;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Serilog;
-using Terminal.Gui.App;
-using Terminal.Gui.Drawing;
-using Terminal.Gui.Input;
-using Terminal.Gui.ViewBase;
-using Terminal.Gui.Views;
+using SharpConsoleUI;
+using SharpConsoleUI.Builders;
+using SharpConsoleUI.Controls;
+using SharpConsoleUI.Extensions;
+using SharpConsoleUI.Layout;
+using SharpConsoleUI.Parsing;
+
+// SharpConsoleUI's ChatRole (a transcript display role) collides with the chat-protocol role
+// of Microsoft.Extensions.AI; in this file the protocol one wins. The display role is used
+// only by TranscriptLog.
+using ChatRole = Microsoft.Extensions.AI.ChatRole;
 
 namespace HarnessCli.UI;
 
 /// <summary>
-/// Console chat window for the harness agent — the Terminal.Gui port of the WinForms
+/// Console chat window for the harness agent — the SharpConsoleUI port of the WinForms
 /// MainForm, with the same structure: a session sidebar on the left (working folders and
 /// their sessions), a menu bar on top (session, model, mode, resources), the streaming chat
 /// transcript with the input row, and a status bar showing the working folder, token usage
 /// and busy state. Each working folder gets its own <see cref="AgentHost"/>; sessions can be
 /// switched at any time — their transcripts are kept per session.
 /// Agent turns run on a background task; every UI mutation is marshalled back through
-/// <see cref="IApplication.Invoke(Action)"/>.
+/// <see cref="ConsoleWindowSystem.EnqueueOnUIThread(Action)"/>.
 /// </summary>
-internal sealed class MainWindow : Window
+internal sealed class MainWindow
 {
     private const string DefaultSessionTitle = "Новая сессия";
     private const int SidebarWidth = 30;
@@ -33,31 +38,25 @@ internal sealed class MainWindow : Window
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
-    private readonly IApplication app;
+    private readonly ConsoleWindowSystem ws;
     private readonly Dictionary<string, AgentHost> hosts = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> folderOrder = [];
     private readonly List<SessionEntry> sessions = [];
-    private readonly string initialFolder;
-
-    // Sidebar rows: the observable collection feeds the ListView, the tag list maps a row
-    // index back to the folder header or the session it stands for.
-    private readonly ObservableCollection<string> sidebarRows = [];
-    private readonly List<object> sidebarTags = [];
 
     // Streaming chunks are buffered here and flushed into the transcript in one batch
     // (per-chunk redraws made the log flicker and scroll constantly).
-    private readonly List<TranscriptView.Segment> pendingOutput = [];
+    private readonly List<TranscriptChunk> pendingOutput = [];
     private readonly Lock pendingLock = new();
 
-    private readonly ListView sidebar;
-    private readonly FrameView chatFrame;
-    private readonly TranscriptView transcript;
-    private readonly TextField input;
-    private readonly Button sendButton;
-    private readonly Shortcut folderStatus;
-    private readonly Shortcut usageStatus;
-    private readonly Shortcut stateStatus;
+    private readonly Window window;
+    private readonly ListControl sidebar;
+    private readonly TranscriptLog transcript;
+    private readonly PromptControl input;
+    private readonly StatusBarItem folderStatus;
+    private readonly StatusBarItem usageStatus;
+    private readonly StatusBarItem stateStatus;
 
+    private string? workingFolder;
     private SessionEntry? active;
     private AgentModeProvider? modeProvider;
     private volatile bool busy;
@@ -71,168 +70,190 @@ internal sealed class MainWindow : Window
     // without showing the approval dialog. Toggled from the "Режим" menu.
     private bool autoPermissions;
 
-    public MainWindow(IApplication app, string initialFolder)
+    /// <param name="initialFolder">
+    /// Working folder to open the first session in, or <see langword="null"/> to ask for one
+    /// once the main loop is up (the folder picker is a window and needs a running system).
+    /// </param>
+    public MainWindow(ConsoleWindowSystem ws, string? initialFolder)
     {
-        this.app = app;
-        this.initialFolder = initialFolder;
+        this.ws = ws;
+        this.workingFolder = initialFolder;
 
-        this.BorderStyle = LineStyle.None;
-        this.SchemeName = Theme.SchemeApp;
-        this.Title = "HarnessCli";
+        this.window = new WindowBuilder(ws)
+            .WithTitle("HarnessCli")
+            // Restore bounds for when the user un-maximizes; the window starts maximized.
+            .WithSize(120, 30)
+            .Maximized()
+            .WithAsyncWindowThread(this.WindowThreadAsync)
+            .Build();
 
         var menu = this.BuildMenu();
+        menu.StickyPosition = StickyPosition.Top;
 
-        var sidebarFrame = new FrameView
-        {
-            Title = "Сессии",
-            X = 0,
-            Y = 1,
-            Width = SidebarWidth,
-            Height = Dim.Fill(1),
-            SchemeName = Theme.SchemeSidebar,
-        };
+        this.sidebar = Controls.List("Сессии")
+            .WithAlignment(HorizontalAlignment.Stretch)
+            .WithVerticalAlignment(VerticalAlignment.Fill)
+            .Build();
+        this.sidebar.ItemActivated += this.OnSidebarItemActivated;
 
-        this.sidebar = new ListView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            SchemeName = Theme.SchemeSidebar,
-        };
-        this.sidebar.SetSource(this.sidebarRows);
-        this.sidebar.Accepting += this.OnSidebarAccepting;
-        sidebarFrame.Add(this.sidebar);
+        var chat = Controls.ChatTranscript().Build();
+        this.transcript = new TranscriptLog(chat);
 
-        this.chatFrame = new FrameView
-        {
-            Title = "Чат",
-            X = SidebarWidth,
-            Y = 1,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-            SchemeName = Theme.SchemeApp,
-        };
+        this.input = Controls.Prompt("› ")
+            .UnfocusOnEnter(false)
+            .WithHistory()
+            .WithAlignment(HorizontalAlignment.Stretch)
+            .OnEntered((_, text) => this.Send(text))
+            .Build();
 
-        this.transcript = new TranscriptView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-        };
+        var root = Controls.Grid()
+            .Columns(GridLength.Cells(SidebarWidth), GridLength.Star(1))
+            .Rows(GridLength.Star(1), GridLength.Auto())
+            .ColumnSplitterAfter(0)
+            .Place(this.sidebar, 0, 0)
+            .Place(chat, 0, 1)
+            .Place(this.input, 1, 0, colSpan: 2)
+            .WithAlignment(HorizontalAlignment.Stretch)
+            .WithVerticalAlignment(VerticalAlignment.Fill)
+            .Build();
 
-        this.input = new TextField
+        var statusBar = Controls.StatusBar().Build();
+        this.folderStatus = statusBar.AddLeftText(Escape(initialFolder ?? "—"));
+        statusBar.AddCenter("Enter", "Отправить", () => this.Send(this.input.Input));
+        statusBar.AddCenter("Ctrl+P", "Auto permissions", this.ToggleAutoPermissions);
+        this.usageStatus = statusBar.AddRightText("📊 TOKENS —");
+        this.stateStatus = statusBar.AddRightText("Готово");
+
+        this.window.AddControl(menu);
+        this.window.AddControl(root);
+        this.window.AddControl(statusBar);
+
+        this.window.KeyPressed += (_, e) =>
         {
-            X = 0,
-            Y = Pos.AnchorEnd(1),
-            Width = Dim.Fill(14),
-            SchemeName = Theme.SchemeInput,
-        };
-        this.input.Accepting += (_, e) =>
-        {
+            if (e.AlreadyHandled)
+            {
+                return;
+            }
+
+            if (!e.KeyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
+            {
+                return;
+            }
+
+            // MenuControl's shortcut column is display-only — the real bindings live here.
+            switch (e.KeyInfo.Key)
+            {
+                case ConsoleKey.P:
+                    this.ToggleAutoPermissions();
+                    break;
+
+                case ConsoleKey.N:
+                    this.RunBackground(() => this.CreateSessionAsync(this.active?.Folder ?? this.workingFolder));
+                    break;
+
+                case ConsoleKey.O:
+                    this.RunBackground(this.PickFolderAsync);
+                    break;
+
+                case ConsoleKey.Q:
+                    this.ws.Shutdown();
+                    break;
+
+                default:
+                    return;
+            }
+
             e.Handled = true;
-            this.Send();
         };
 
-        this.sendButton = new Button
-        {
-            Text = "Отправить",
-            X = Pos.AnchorEnd(13),
-            Y = Pos.AnchorEnd(1),
-            Width = 13,
-            IsDefault = true,
-            SchemeName = Theme.SchemeAccentButton,
-        };
-        this.sendButton.Accepting += (_, e) =>
-        {
-            e.Handled = true;
-            this.Send();
-        };
-
-        this.chatFrame.Add(this.transcript, this.input, this.sendButton);
-
-        this.folderStatus = new Shortcut { Title = initialFolder, CanFocus = false };
-        this.usageStatus = new Shortcut { Title = "📊 TOKENS —", CanFocus = false };
-        this.stateStatus = new Shortcut { Title = "Готово", CanFocus = false };
-        var statusBar = new StatusBar([this.folderStatus, this.usageStatus, this.stateStatus])
-        {
-            X = 0,
-            Y = Pos.AnchorEnd(1),
-            Width = Dim.Fill(),
-            SchemeName = Theme.SchemeBar,
-        };
-
-        this.Add(menu, sidebarFrame, this.chatFrame, statusBar);
-
-        // While the agent is streaming, buffered chunks are flushed once a second.
-        this.app.AddTimeout(TimeSpan.FromSeconds(1), () =>
-        {
-            this.FlushOutput();
-            return true;
-        });
-
-        // The first session is created once the main loop is up (host creation is slow and
-        // must not block the constructor).
-        this.app.Invoke(() => _ = Task.Run(() => this.CreateSessionAsync(this.initialFolder)));
+        ws.AddWindow(this.window);
     }
 
     // ---- Menu ----
 
-    private MenuBar BuildMenu()
-    {
-        var menu = new MenuBar([
-            new MenuBarItem("_Сессия", [
-                new MenuItem("_Новая сессия", "в текущей папке", () => this.RunBackground(() => this.CreateSessionAsync(this.active?.Folder ?? this.initialFolder)), Key.N.WithCtrl),
-                new MenuItem("_Рабочая папка…", "новая сессия в другой папке", this.PickFolder, Key.O.WithCtrl),
-                new MenuItem("_Очистить вывод", "стереть транскрипт сессии", this.ClearTranscript),
-                new Line(),
-                new MenuItem("_Выход", "", () => this.app.RequestStop(this), Key.Q.WithCtrl),
-            ]),
-            new MenuBarItem("_Модель", [
-                new MenuItem("_Выбрать из списка…", "модели с сервера Ollama", () => this.RunBackground(this.ChooseModelAsync)),
-                new MenuItem("_Ввести имя модели…", "для эндпоинтов без /api/tags", this.EnterModelName),
-            ]),
-            new MenuBarItem("_Режим", [
-                new MenuItem("_execute", "выполнять действия сразу", () => this.RunBackground(() => this.SetModeAsync("execute"))),
-                new MenuItem("_plan", "сначала составить план", () => this.RunBackground(() => this.SetModeAsync("plan"))),
-                new Line(),
-                new MenuItem("_Auto permissions", "разрешать инструменты без запроса", this.ToggleAutoPermissions, Key.P.WithCtrl),
-            ]),
-            new MenuBarItem("_Ресурсы", [
-                new MenuItem("_Агенты…", "роли из agents\\", () => this.ShowResources("Агенты", ResourceKind.Agents)),
-                new MenuItem("_Навыки…", "SKILL.md из skills\\", () => this.ShowResources("Навыки (skills)", ResourceKind.Skills)),
-                new MenuItem("_Плагины…", "плагины из plugins\\", () => this.ShowResources("Плагины", ResourceKind.Plugins)),
-                new MenuItem("_Скрипты…", "dotnet-скрипты рабочей папки", () => this.ShowResources("Скрипты (dotnet)", ResourceKind.Scripts)),
-            ]),
-        ])
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            SchemeName = Theme.SchemeBar,
-        };
+    private MenuControl BuildMenu() => Controls.Menu()
+        .Horizontal()
+        .Sticky()
+        .AddItem("Сессия", m => m
+            .AddItem("Новая сессия", "Ctrl+N", () =>
+                this.RunBackground(() => this.CreateSessionAsync(this.active?.Folder ?? this.workingFolder)))
+            .AddItem("Рабочая папка…", "Ctrl+O", () => this.RunBackground(this.PickFolderAsync))
+            .AddItem("Очистить вывод", this.ClearTranscript)
+            .AddSeparator()
+            .AddItem("Выход", "Ctrl+Q", () => this.ws.Shutdown()))
+        .AddItem("Модель", m => m
+            .AddItem("Выбрать из списка…", () => this.RunBackground(this.ChooseModelAsync))
+            .AddItem("Ввести имя модели…", () => this.RunBackground(this.EnterModelNameAsync)))
+        .AddItem("Режим", m => m
+            .AddItem("execute", () => this.RunBackground(() => this.SetModeAsync("execute")))
+            .AddItem("plan", () => this.RunBackground(() => this.SetModeAsync("plan")))
+            .AddSeparator()
+            .AddItem("Auto permissions", "Ctrl+P", this.ToggleAutoPermissions))
+        .AddItem("Ресурсы", m => m
+            .AddItem("Агенты…", () => this.RunBackground(() => this.ShowResourcesAsync("Агенты", ResourceKind.Agents)))
+            .AddItem("Навыки…", () => this.RunBackground(() => this.ShowResourcesAsync("Навыки (skills)", ResourceKind.Skills)))
+            .AddItem("Плагины…", () => this.RunBackground(() => this.ShowResourcesAsync("Плагины", ResourceKind.Plugins)))
+            .AddItem("Скрипты…", () => this.RunBackground(() => this.ShowResourcesAsync("Скрипты (dotnet)", ResourceKind.Scripts))))
+        .Build();
 
-        return menu;
+    // ---- Window thread ----
+
+    /// <summary>
+    /// Runs for the lifetime of the window: resolves the working folder (asking for one when
+    /// the command line and the saved settings did not supply it), opens the first session,
+    /// then flushes buffered output four times a second. The interval used to be a second
+    /// because a re-render cost hundreds of milliseconds; the transcript now appends to the
+    /// open message instead of re-rendering, so the answer can appear as it arrives.
+    /// </summary>
+    private async Task WindowThreadAsync(Window window, CancellationToken ct)
+    {
+        // The folder picker is a window of its own — it cannot open before this one is live.
+        while (!window.GetIsActive() && !ct.IsCancellationRequested)
+        {
+            await Task.Delay(50, ct).ConfigureAwait(false);
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        this.workingFolder ??= await this.OnUiAsync(
+            () => AppDialogs.PickFolderAsync(this.ws, initial: null)).ConfigureAwait(false);
+
+        if (this.workingFolder is null)
+        {
+            // The working folder is mandatory — without it the agent has nothing to operate on.
+            this.ws.Shutdown(1);
+            return;
+        }
+
+        await this.CreateSessionAsync(this.workingFolder).ConfigureAwait(false);
+
+        while (!ct.IsCancellationRequested)
+        {
+            this.ws.EnqueueOnUIThread(this.FlushOutput);
+            try
+            {
+                await Task.Delay(250, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
     }
 
     // ---- Sidebar ----
 
-    private void OnSidebarAccepting(object? sender, CommandEventArgs e)
+    private void OnSidebarItemActivated(object? sender, ListItem item)
     {
-        e.Handled = true;
-        if (this.busy)
+        if (this.busy || item.Tag is null)
         {
             return;
         }
 
-        int index = this.sidebar.SelectedItem ?? -1;
-        if (index < 0 || index >= this.sidebarTags.Count)
-        {
-            return;
-        }
-
-        switch (this.sidebarTags[index])
+        switch (item.Tag)
         {
             // Enter on a folder header starts a new session in that folder (the console
             // equivalent of the "+" hot zone of the WinForms sidebar).
@@ -248,10 +269,9 @@ internal sealed class MainWindow : Window
 
     private void RebuildSidebar()
     {
-        int previous = this.sidebar.SelectedItem ?? 0;
+        int previous = this.sidebar.SelectedIndex;
 
-        this.sidebarRows.Clear();
-        this.sidebarTags.Clear();
+        this.sidebar.Items.Clear();
 
         foreach (var folder in this.folderOrder)
         {
@@ -261,8 +281,9 @@ internal sealed class MainWindow : Window
                 name = folder;
             }
 
-            this.sidebarRows.Add($"📂 {name}");
-            this.sidebarTags.Add(new FolderTag(folder));
+            // The folder header and each of its sessions carry themselves in ListItem.Tag,
+            // so activating a row needs no parallel index table.
+            this.AddSidebarRow($"📂 {name}", new FolderTag(folder));
 
             foreach (var session in this.sessions)
             {
@@ -272,35 +293,37 @@ internal sealed class MainWindow : Window
                 }
 
                 bool isActive = ReferenceEquals(session, this.active);
-                this.sidebarRows.Add($" {(isActive ? "▸" : " ")} {session.Title}");
-                this.sidebarTags.Add(session);
+                this.AddSidebarRow($" {(isActive ? "▸" : " ")} {session.Title}", session);
             }
         }
 
-        if (this.sidebarRows.Count > 0)
+        if (this.sidebar.Items.Count > 0)
         {
-            this.sidebar.SelectedItem = Math.Clamp(previous, 0, this.sidebarRows.Count - 1);
+            this.sidebar.SelectedIndex = Math.Clamp(previous, 0, this.sidebar.Items.Count - 1);
         }
 
-        this.sidebar.SetNeedsDraw();
+        this.sidebar.Invalidate();
     }
+
+    private void AddSidebarRow(string text, object tag) =>
+        this.sidebar.Items.Add(new ListItem(Escape(text)) { Tag = tag });
 
     // ---- Hosts, folders and sessions ----
 
-    private void PickFolder()
+    private async Task PickFolderAsync()
     {
         if (this.busy)
         {
             return;
         }
 
-        string? folder = Dialogs.PickFolder(this.app, 
-            "Рабочая папка агента (file_access, поиск и команды работают в ней)",
-            this.active?.Folder ?? this.initialFolder);
+        string? folder = await this.OnUiAsync(() => AppDialogs.PickFolderAsync(
+            this.ws,
+            this.active?.Folder ?? this.workingFolder)).ConfigureAwait(false);
 
         if (folder is not null)
         {
-            this.RunBackground(() => this.CreateSessionAsync(folder));
+            await this.CreateSessionAsync(folder).ConfigureAwait(false);
         }
     }
 
@@ -324,8 +347,8 @@ internal sealed class MainWindow : Window
             // Mirror plugin logs into the chat output (they arrive from background threads).
             host.Plugins.PluginLog += (plugin, message) =>
             {
-                this.AppendLine($"🔌 [{plugin}] {message}", TranscriptView.SegmentKind.Info);
-                this.app.Invoke(this.FlushOutput);
+                this.AppendLine($"🔌 [{plugin}] {message}", TranscriptKind.Info);
+                this.ws.EnqueueOnUIThread(this.FlushOutput);
             };
 
             if (!this.modelsLoaded)
@@ -338,7 +361,7 @@ internal sealed class MainWindow : Window
         catch (Exception ex)
         {
             Log.Error(ex, "Agent host creation failed for folder {Folder}", folder);
-            this.app.Invoke(() => Dialogs.Error(this.app, "Ошибка запуска агента", ex.Message));
+            this.ws.EnqueueOnUIThread(() => _ = AppDialogs.ErrorAsync(this.ws, "Ошибка запуска агента", ex.Message));
             return null;
         }
         finally
@@ -348,8 +371,13 @@ internal sealed class MainWindow : Window
     }
 
     /// <summary>Creates a new session in <paramref name="folder"/> and makes it active.</summary>
-    private async Task CreateSessionAsync(string folder)
+    private async Task CreateSessionAsync(string? folder)
     {
+        if (folder is null)
+        {
+            return;
+        }
+
         var host = await this.EnsureHostAsync(folder).ConfigureAwait(false);
         if (host is null)
         {
@@ -364,7 +392,7 @@ internal sealed class MainWindow : Window
 
             // The session/folder lists belong to the UI thread (the sidebar enumerates them
             // while redrawing) — mutate them there, never from this background task.
-            await this.OnUiAsync(() =>
+            await this.ws.InvokeAsync(() =>
             {
                 this.sessions.Add(entry);
                 if (!this.folderOrder.Contains(folder, StringComparer.OrdinalIgnoreCase))
@@ -378,7 +406,7 @@ internal sealed class MainWindow : Window
         catch (Exception ex)
         {
             Log.Error(ex, "Session creation failed in folder {Folder}", folder);
-            this.AppendLine($"❌ Не удалось создать сессию: {ex.Message}", TranscriptView.SegmentKind.Error);
+            this.AppendLine($"❌ Не удалось создать сессию: {ex.Message}", TranscriptKind.Error);
         }
         finally
         {
@@ -392,15 +420,15 @@ internal sealed class MainWindow : Window
     /// </summary>
     private async Task ActivateSessionAsync(SessionEntry entry, bool greet = false)
     {
-        await this.OnUiAsync(() =>
+        await this.ws.InvokeAsync(() =>
         {
             this.SaveActiveTranscript();
             this.active = entry;
             this.atLineStart = entry.AtLineStart;
-            this.transcript.LoadSegments(entry.Transcript);
-            this.usageStatus.Title = entry.UsageText;
-            this.folderStatus.Title = entry.Folder;
-            this.chatFrame.Title = $"Чат — {entry.Host.ModelName}";
+            this.transcript.Load(entry.Transcript);
+            this.usageStatus.Label = Escape(entry.UsageText);
+            this.folderStatus.Label = Escape(entry.Folder);
+            this.window.Title = $"HarnessCli — {entry.Host.ModelName}";
             this.RebuildSidebar();
         }).ConfigureAwait(false);
 
@@ -412,15 +440,15 @@ internal sealed class MainWindow : Window
             this.AppendLine(
                 "Попросите меня прочитать или отредактировать файл в рабочей папке, " +
                 "что-нибудь найти, выполнить команду оболочки или запустить код на Python. " +
-                "Enter — отправить, F9 — меню, Tab — переход между панелями.",
-                TranscriptView.SegmentKind.Info);
+                "Enter — отправить, F10 — меню, Tab — переход между панелями.",
+                TranscriptKind.Info);
         }
 
         await this.RefreshModeAsync().ConfigureAwait(false);
-        this.app.Invoke(() =>
+        this.ws.EnqueueOnUIThread(() =>
         {
             this.FlushOutput();
-            this.input.SetFocus();
+            this.input.RequestFocus();
         });
     }
 
@@ -432,7 +460,7 @@ internal sealed class MainWindow : Window
         {
             this.active.Transcript = this.transcript.Snapshot();
             this.active.AtLineStart = this.atLineStart;
-            this.active.UsageText = this.usageStatus.Title ?? string.Empty;
+            this.active.UsageText = this.usageStatus.Label;
         }
     }
 
@@ -443,7 +471,7 @@ internal sealed class MainWindow : Window
             this.pendingOutput.Clear();
         }
 
-        this.transcript.ClearTranscript();
+        this.transcript.Clear();
         this.atLineStart = true;
     }
 
@@ -463,7 +491,7 @@ internal sealed class MainWindow : Window
     /// folder); dotnet scripts live in the active session's working folder. The list is read
     /// from disk on every open — the agent can create a plugin or a script mid-session.
     /// </summary>
-    private void ShowResources(string title, ResourceKind kind)
+    private async Task ShowResourcesAsync(string title, ResourceKind kind)
     {
         var baseDir = AppContext.BaseDirectory;
         var workingDir = this.active?.Host.WorkingDirectory;
@@ -476,11 +504,12 @@ internal sealed class MainWindow : Window
             _ => workingDir is null ? [] : DiscoverFiles(Path.Combine(workingDir, "scripts"), "*.cs"),
         };
 
-        int? picked = Dialogs.Select(
-            this.app,
+        int? picked = await this.OnUiAsync(() => AppDialogs.SelectAsync(
+            this.ws,
             title,
             items.Select(i => i.Name).ToList(),
-            details: index => items[index].Summary.Length > 0 ? items[index].Summary : items[index].Path);
+            details: index => items[index].Summary.Length > 0 ? items[index].Summary : items[index].Path))
+            .ConfigureAwait(false);
 
         if (picked is not int index || index < 0 || index >= items.Count)
         {
@@ -498,9 +527,11 @@ internal sealed class MainWindow : Window
 
         // A pick fills the input box instead of sending straight away — most entries need
         // the user to append the actual task before the turn starts.
-        this.input.Text = prompt;
-        this.input.InsertionPoint = prompt.Length;
-        this.input.SetFocus();
+        this.ws.EnqueueOnUIThread(() =>
+        {
+            this.input.SetInput(prompt);
+            this.input.RequestFocus();
+        });
     }
 
     // Layout of agents/, skills/ and plugins/: one folder per item, holding a marker file.
@@ -601,17 +632,17 @@ internal sealed class MainWindow : Window
 
     // ---- Chat turn ----
 
-    private void Send()
+    private void Send(string raw)
     {
         var entry = this.active;
-        string text = (this.input.Text ?? string.Empty).Trim();
+        string text = (raw ?? string.Empty).Trim();
         if (this.busy || entry is null || text.Length == 0)
         {
             return;
         }
 
-        this.input.Text = string.Empty;
-        this.AppendLine($"👤 Вы: {text}", TranscriptView.SegmentKind.User, bold: true);
+        this.input.SetInput(string.Empty);
+        this.AppendLine(text, TranscriptKind.User);
 
         // The first message names the session in the sidebar.
         if (entry.Title == DefaultSessionTitle)
@@ -635,10 +666,10 @@ internal sealed class MainWindow : Window
         {
             this.SetBusy(false);
             await this.RefreshModeAsync().ConfigureAwait(false);
-            this.app.Invoke(() =>
+            this.ws.EnqueueOnUIThread(() =>
             {
                 this.FlushOutput();
-                this.input.SetFocus();
+                this.input.RequestFocus();
             });
         }
     }
@@ -669,17 +700,13 @@ internal sealed class MainWindow : Window
             catch (Exception ex)
             {
                 Log.Error(ex, "Agent turn stream failed");
-                this.AppendLine($"❌ Ошибка потока: {ex.GetType().Name}: {ex.Message}", TranscriptView.SegmentKind.Error);
+                this.AppendLine($"❌ Ошибка потока: {ex.GetType().Name}: {ex.Message}", TranscriptKind.Error);
             }
 
             this.EnsureLineBreak();
 
             // The full context must be visible before the modal approval dialogs open.
-            await this.OnUiAsync(() =>
-            {
-                this.FlushOutput();
-                return true;
-            }).ConfigureAwait(false);
+            await this.ws.InvokeAsync(this.FlushOutput).ConfigureAwait(false);
 
             next = approvals.Count > 0
                 ? await this.CollectApprovalResponsesAsync(approvals).ConfigureAwait(false)
@@ -705,7 +732,7 @@ internal sealed class MainWindow : Window
         try
         {
             var oldAgent = host.Agent;
-            var affected = await this.OnUiAsync(
+            var affected = await this.ws.InvokeAsync(
                 () => this.sessions.Where(s => ReferenceEquals(s.Host, host)).ToList()).ConfigureAwait(false);
             var snapshots = new Dictionary<SessionEntry, JsonElement>();
             foreach (var session in affected)
@@ -726,12 +753,12 @@ internal sealed class MainWindow : Window
             this.modeProvider = host.Agent.GetService<AgentModeProvider>();
             this.AppendLine(
                 "🔌 Резидентный плагин загружен: его инструменты доступны со следующего сообщения.",
-                TranscriptView.SegmentKind.Info);
+                TranscriptKind.Info);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Plugin tools refresh failed");
-            this.AppendLine($"❌ Не удалось обновить инструменты плагинов: {ex.Message}", TranscriptView.SegmentKind.Error);
+            this.AppendLine($"❌ Не удалось обновить инструменты плагинов: {ex.Message}", TranscriptKind.Error);
         }
     }
 
@@ -741,11 +768,11 @@ internal sealed class MainWindow : Window
         {
             case ToolApprovalRequestContent approvalRequest:
                 approvals.Add(approvalRequest);
-                this.AppendLine($"⚠️ Требуется подтверждение: {FormatToolCall(approvalRequest.ToolCall, maxArgsLength: 160)}", TranscriptView.SegmentKind.Tool);
+                this.AppendLine($"⚠️ Требуется подтверждение: {FormatToolCall(approvalRequest.ToolCall, maxArgsLength: 160)}", TranscriptKind.Tool);
                 break;
 
             case FunctionCallContent functionCall:
-                this.AppendLine($"🔧 Вызов инструмента: {FormatToolCall(functionCall, maxArgsLength: 160)}…", TranscriptView.SegmentKind.Tool);
+                this.AppendLine($"🔧 Вызов инструмента: {FormatToolCall(functionCall, maxArgsLength: 160)}…", TranscriptKind.Tool);
                 break;
 
             case ErrorContent error:
@@ -755,20 +782,20 @@ internal sealed class MainWindow : Window
                     errorText += $" (код: {error.ErrorCode})";
                 }
 
-                this.AppendLine(errorText, TranscriptView.SegmentKind.Error);
+                this.AppendLine(errorText, TranscriptKind.Error);
                 break;
 
             case UsageContent usage:
                 string usageText = usage.Details is not null ? this.FormatUsage(usage.Details) : "📊 TOKENS —";
-                this.app.Invoke(() => this.usageStatus.Title = usageText);
+                this.ws.EnqueueOnUIThread(() => this.usageStatus.Label = Escape(usageText));
                 break;
 
             case TextReasoningContent reasoning when !string.IsNullOrEmpty(reasoning.Text):
-                this.AppendText(reasoning.Text, TranscriptView.SegmentKind.Reasoning);
+                this.AppendText(reasoning.Text, TranscriptKind.Reasoning);
                 break;
 
             case TextContent textContent when !string.IsNullOrEmpty(textContent.Text):
-                this.AppendText(textContent.Text, TranscriptView.SegmentKind.Markdown);
+                this.AppendText(textContent.Text, TranscriptKind.Markdown);
                 break;
         }
     }
@@ -778,58 +805,55 @@ internal sealed class MainWindow : Window
     /// the corresponding approval-response message for the next agent invocation.
     /// The dialogs run on the UI thread while this background turn awaits them.
     /// </summary>
-    private Task<List<ChatMessage>> CollectApprovalResponsesAsync(List<ToolApprovalRequestContent> approvals)
+    private async Task<List<ChatMessage>> CollectApprovalResponsesAsync(List<ToolApprovalRequestContent> approvals)
     {
+        var responses = new List<ChatMessage>(approvals.Count);
+
         // "Auto permissions" mode: grant every request without showing a dialog.
         if (this.autoPermissions)
         {
-            var granted = new List<ChatMessage>(approvals.Count);
             foreach (var request in approvals)
             {
                 this.AppendLine(
                     $"🔓 Авто-разрешено: {FormatToolCall(request.ToolCall, maxArgsLength: 120)}",
-                    TranscriptView.SegmentKind.Info);
-                granted.Add(new ChatMessage(ChatRole.User,
+                    TranscriptKind.Info);
+                responses.Add(new ChatMessage(ChatRole.User,
                     [request.CreateResponse(approved: true, reason: "Auto permissions mode")]));
             }
 
-            return Task.FromResult(granted);
+            return responses;
         }
 
-        return this.OnUiAsync(() =>
+        foreach (var request in approvals)
         {
-            var responses = new List<ChatMessage>(approvals.Count);
+            var decision = await this.OnUiAsync(() => AppDialogs.AskToolApprovalAsync(
+                this.ws, FormatToolCall(request.ToolCall, maxArgsLength: 2000))).ConfigureAwait(false);
 
-            foreach (var request in approvals)
+            AIContent response = decision switch
             {
-                var decision = Dialogs.AskToolApproval(this.app, FormatToolCall(request.ToolCall, maxArgsLength: 2000));
+                ToolApprovalDecision.AlwaysApproveTool => request.CreateAlwaysApproveToolResponse("User chose to always approve this tool"),
+                ToolApprovalDecision.AlwaysApproveToolWithArguments => request.CreateAlwaysApproveToolWithArgumentsResponse("User chose to always approve this tool with these arguments"),
+                ToolApprovalDecision.Deny => request.CreateResponse(approved: false, reason: "User denied"),
+                _ => request.CreateResponse(approved: true, reason: "User approved"),
+            };
 
-                AIContent response = decision switch
-                {
-                    ToolApprovalDecision.AlwaysApproveTool => request.CreateAlwaysApproveToolResponse("User chose to always approve this tool"),
-                    ToolApprovalDecision.AlwaysApproveToolWithArguments => request.CreateAlwaysApproveToolWithArgumentsResponse("User chose to always approve this tool with these arguments"),
-                    ToolApprovalDecision.Deny => request.CreateResponse(approved: false, reason: "User denied"),
-                    _ => request.CreateResponse(approved: true, reason: "User approved"),
-                };
+            string outcome = decision switch
+            {
+                ToolApprovalDecision.AlwaysApproveTool => "✅ Всегда разрешено (любые аргументы)",
+                ToolApprovalDecision.AlwaysApproveToolWithArguments => "✅ Всегда разрешено (эти аргументы)",
+                ToolApprovalDecision.Deny => "❌ Отклонено",
+                _ => "✅ Разрешено",
+            };
 
-                string outcome = decision switch
-                {
-                    ToolApprovalDecision.AlwaysApproveTool => "✅ Всегда разрешено (любые аргументы)",
-                    ToolApprovalDecision.AlwaysApproveToolWithArguments => "✅ Всегда разрешено (эти аргументы)",
-                    ToolApprovalDecision.Deny => "❌ Отклонено",
-                    _ => "✅ Разрешено",
-                };
+            this.AppendLine(
+                $"🔹 {outcome}: {FormatToolCall(request.ToolCall, maxArgsLength: 120)}",
+                decision == ToolApprovalDecision.Deny ? TranscriptKind.Error : TranscriptKind.Info);
 
-                this.AppendLine(
-                    $"🔹 {outcome}: {FormatToolCall(request.ToolCall, maxArgsLength: 120)}",
-                    decision == ToolApprovalDecision.Deny ? TranscriptView.SegmentKind.Error : TranscriptView.SegmentKind.Info);
+            responses.Add(new ChatMessage(ChatRole.User, [response]));
+        }
 
-                responses.Add(new ChatMessage(ChatRole.User, [response]));
-            }
-
-            this.FlushOutput();
-            return responses;
-        });
+        await this.ws.InvokeAsync(this.FlushOutput).ConfigureAwait(false);
+        return responses;
     }
 
     // ---- Model selection ----
@@ -858,7 +882,7 @@ internal sealed class MainWindow : Window
         {
             this.AppendLine(
                 "Список моделей с сервера получить не удалось — используйте «Модель → Ввести имя модели…».",
-                TranscriptView.SegmentKind.Info);
+                TranscriptKind.Info);
         }
     }
 
@@ -877,7 +901,8 @@ internal sealed class MainWindow : Window
 
         var models = this.knownModels;
         int current = models.FindIndex(m => string.Equals(m, entry.Host.ModelName, StringComparison.OrdinalIgnoreCase));
-        int? picked = await this.OnUiAsync(() => Dialogs.Select(this.app, "Модель", models, Math.Max(current, 0))).ConfigureAwait(false);
+        int? picked = await this.OnUiAsync(
+            () => AppDialogs.SelectAsync(this.ws, "Модель", models, Math.Max(current, 0))).ConfigureAwait(false);
 
         if (picked is int index && index >= 0 && index < models.Count)
         {
@@ -885,17 +910,20 @@ internal sealed class MainWindow : Window
         }
     }
 
-    private void EnterModelName()
+    private async Task EnterModelNameAsync()
     {
         if (this.busy)
         {
             return;
         }
 
-        string? name = Dialogs.PromptText(this.app, "Модель", "Имя модели Ollama:", this.active?.Host.ModelName ?? string.Empty);
+        string? name = await this.OnUiAsync(() => AppDialogs.PromptTextAsync(
+            this.ws, "Модель", "Имя модели Ollama:", this.active?.Host.ModelName ?? string.Empty))
+            .ConfigureAwait(false);
+
         if (name is not null)
         {
-            this.RunBackground(() => this.ApplyModelAsync(name));
+            await this.ApplyModelAsync(name).ConfigureAwait(false);
         }
     }
 
@@ -927,7 +955,7 @@ internal sealed class MainWindow : Window
 
             // Snapshot every session on this host up front: a context-window change
             // replaces the agent, and sessions only run against the agent that owns them.
-            var affected = await this.OnUiAsync(
+            var affected = await this.ws.InvokeAsync(
                 () => this.sessions.Where(s => ReferenceEquals(s.Host, host)).ToList()).ConfigureAwait(false);
             var snapshots = new Dictionary<SessionEntry, JsonElement>();
             foreach (var session in affected)
@@ -946,16 +974,16 @@ internal sealed class MainWindow : Window
                 this.modeProvider = host.Agent.GetService<AgentModeProvider>();
             }
 
-            this.app.Invoke(() => this.chatFrame.Title = $"Чат — {host.ModelName}");
+            this.ws.EnqueueOnUIThread(() => this.window.Title = $"HarnessCli — {host.ModelName}");
             this.AppendLine(
                 $"Модель переключена: {modelName} (контекстное окно: {host.ContextWindowTokens:N0} токенов; " +
                 "действует со следующего сообщения, сессия сохранена)",
-                TranscriptView.SegmentKind.Info);
+                TranscriptKind.Info);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Model switch to {Model} failed", modelName);
-            this.AppendLine($"❌ Не удалось переключить модель: {ex.Message}", TranscriptView.SegmentKind.Error);
+            this.AppendLine($"❌ Не удалось переключить модель: {ex.Message}", TranscriptKind.Error);
         }
         finally
         {
@@ -972,7 +1000,7 @@ internal sealed class MainWindow : Window
             this.autoPermissions
                 ? "🔓 Auto permissions включён: инструменты выполняются без подтверждения."
                 : "🔐 Auto permissions выключен: подтверждение инструментов снова требуется.",
-            TranscriptView.SegmentKind.Info);
+            TranscriptKind.Info);
         this.UpdateStateLabel();
         this.FlushOutput();
     }
@@ -988,16 +1016,16 @@ internal sealed class MainWindow : Window
         {
             await this.modeProvider.SetModeAsync(this.active.Session, mode).ConfigureAwait(false);
             this.currentMode = mode;
-            this.AppendLine($"Режим переключён: {mode}", TranscriptView.SegmentKind.Info);
+            this.AppendLine($"Режим переключён: {mode}", TranscriptKind.Info);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Mode switch to {Mode} failed", mode);
-            this.AppendLine($"❌ Не удалось переключить режим: {ex.Message}", TranscriptView.SegmentKind.Error);
+            this.AppendLine($"❌ Не удалось переключить режим: {ex.Message}", TranscriptKind.Error);
             await this.RefreshModeAsync().ConfigureAwait(false);
         }
 
-        this.app.Invoke(() =>
+        this.ws.EnqueueOnUIThread(() =>
         {
             this.UpdateStateLabel();
             this.FlushOutput();
@@ -1014,7 +1042,7 @@ internal sealed class MainWindow : Window
         try
         {
             this.currentMode = await this.modeProvider.GetModeAsync(this.active.Session).ConfigureAwait(false);
-            this.app.Invoke(this.UpdateStateLabel);
+            this.ws.EnqueueOnUIThread(this.UpdateStateLabel);
         }
         catch (Exception ex)
         {
@@ -1030,10 +1058,9 @@ internal sealed class MainWindow : Window
         this.busy = busy;
         this.busyState = state;
 
-        this.app.Invoke(() =>
+        this.ws.EnqueueOnUIThread(() =>
         {
-            this.sendButton.Enabled = !busy;
-            this.input.ReadOnly = busy;
+            this.input.IsEnabled = !busy;
             this.UpdateStateLabel();
             if (!busy)
             {
@@ -1045,8 +1072,8 @@ internal sealed class MainWindow : Window
     private void UpdateStateLabel()
     {
         string state = this.busy ? this.busyState ?? "Агент работает…" : "Готово";
-        this.stateStatus.Title =
-            $"{state} │ режим: {this.currentMode}{(this.autoPermissions ? " │ 🔓 auto" : string.Empty)}";
+        this.stateStatus.Label = Escape(
+            $"{state} │ режим: {this.currentMode}{(this.autoPermissions ? " │ 🔓 auto" : string.Empty)}");
     }
 
     private static string FormatToolCall(AIContent? toolCall, int maxArgsLength)
@@ -1106,32 +1133,35 @@ internal sealed class MainWindow : Window
         return $"{count.Value:N0}";
     }
 
+    // Status-bar labels are markup; user-supplied text (paths, model names, tool output)
+    // must not be parsed as tags.
+    private static string Escape(string text) => MarkupParser.Escape(text);
+
     // ---- Chat log helpers ----
 
-    private void AppendLine(string text, TranscriptView.SegmentKind kind, bool bold = false)
+    private void AppendLine(string text, TranscriptKind kind)
     {
         this.EnsureLineBreak();
-        this.AppendText(text + "\n", kind, bold);
+        this.AppendText(text + "\n", kind);
     }
 
-    private void AppendText(string text, TranscriptView.SegmentKind kind, bool bold = false)
+    private void AppendText(string text, TranscriptKind kind)
     {
         lock (this.pendingLock)
         {
-            this.pendingOutput.Add(new TranscriptView.Segment(text, kind, bold));
+            this.pendingOutput.Add(new TranscriptChunk(text, kind));
         }
 
         this.atLineStart = text.EndsWith('\n');
     }
 
     /// <summary>
-    /// Hands all buffered chunks to the transcript as one batch — it re-renders and scrolls
-    /// once per flush (once a second while streaming), so nothing flickers.
-    /// Must run on the UI thread.
+    /// Hands all buffered chunks to the transcript as one batch, so a streamed answer grows
+    /// four times a second instead of once per token. Must run on the UI thread.
     /// </summary>
     private void FlushOutput()
     {
-        List<TranscriptView.Segment> batch;
+        List<TranscriptChunk> batch;
         lock (this.pendingLock)
         {
             if (this.pendingOutput.Count == 0)
@@ -1143,23 +1173,23 @@ internal sealed class MainWindow : Window
             this.pendingOutput.Clear();
         }
 
-        this.transcript.AppendSegments(batch);
+        this.transcript.Append(batch);
     }
 
     private void EnsureLineBreak()
     {
         if (!this.atLineStart)
         {
-            this.AppendText("\n", TranscriptView.SegmentKind.Markdown);
+            this.AppendText("\n", TranscriptKind.Markdown);
         }
     }
 
     // ---- Threading helpers ----
 
     /// <summary>
-    /// Runs an agent operation off the UI thread. Terminal.Gui's main loop is single
+    /// Runs an agent operation off the UI thread. SharpConsoleUI's main loop is single
     /// threaded: everything the operation shows must go back through
-    /// <see cref="this.app.Invoke(Action)"/>.
+    /// <see cref="ConsoleWindowSystem.EnqueueOnUIThread(Action)"/>.
     /// </summary>
     private void RunBackground(Func<Task> operation) => _ = Task.Run(async () =>
     {
@@ -1170,35 +1200,34 @@ internal sealed class MainWindow : Window
         catch (Exception ex)
         {
             Log.Error(ex, "Background operation failed");
-            this.AppendLine($"❌ {ex.GetType().Name}: {ex.Message}", TranscriptView.SegmentKind.Error);
-            this.app.Invoke(this.FlushOutput);
+            this.AppendLine($"❌ {ex.GetType().Name}: {ex.Message}", TranscriptKind.Error);
+            this.ws.EnqueueOnUIThread(this.FlushOutput);
         }
     });
 
-    /// <summary>Runs <paramref name="action"/> on the UI thread and awaits its completion.</summary>
-    private Task OnUiAsync(Action action) => this.OnUiAsync(() =>
-    {
-        action();
-        return true;
-    });
-
-    /// <summary>Runs <paramref name="func"/> on the UI thread and awaits its result.</summary>
-    private Task<T> OnUiAsync<T>(Func<T> func)
+    /// <summary>
+    /// Starts an async UI operation (a modal dialog) on the UI thread and awaits its result
+    /// from this background caller. <see cref="ConsoleWindowSystem.InvokeAsync{T}(Func{T})"/>
+    /// only covers synchronous work — a dialog completes frames later, so its task has to be
+    /// bridged back here.
+    /// </summary>
+    private Task<T> OnUiAsync<T>(Func<Task<T>> operation)
     {
         var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        this.app.Invoke(() =>
+        this.ws.EnqueueOnUIThread(() => _ = BridgeAsync());
+        return completion.Task;
+
+        async Task BridgeAsync()
         {
             try
             {
-                completion.SetResult(func());
+                completion.SetResult(await operation().ConfigureAwait(false));
             }
             catch (Exception ex)
             {
                 completion.SetException(ex);
             }
-        });
-
-        return completion.Task;
+        }
     }
 
     /// <summary>Marks a sidebar row as a working-folder header (Enter starts a session in it).</summary>
@@ -1217,7 +1246,7 @@ internal sealed class MainWindow : Window
 
         public string Title { get; set; } = DefaultSessionTitle;
 
-        public List<TranscriptView.Segment> Transcript { get; set; } = [];
+        public List<TranscriptChunk> Transcript { get; set; } = [];
 
         public string UsageText { get; set; } = "📊 TOKENS —";
 

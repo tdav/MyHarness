@@ -1,6 +1,8 @@
 using HarnessCli.UI;
 using Serilog;
-using Terminal.Gui.App;
+using SharpConsoleUI;
+using SharpConsoleUI.Configuration;
+using SharpConsoleUI.Drivers;
 
 namespace HarnessCli;
 
@@ -8,29 +10,23 @@ internal static class Program
 {
     /// <summary>
     /// Entry point: take the working folder from the command line, otherwise reuse the last
-    /// saved one when it still exists, otherwise ask for one (Terminal.Gui directory
-    /// picker), then run the chat window. The window creates and owns one harness agent per
-    /// working folder (more folders can be added later via «Сессия → Рабочая папка…»).
+    /// saved one when it still exists, otherwise let the window ask for one (the folder
+    /// picker is itself a window, so it can only open once the main loop runs). The window
+    /// creates and owns one harness agent per working folder (more folders can be added
+    /// later via «Сессия → Рабочая папка…»).
     /// </summary>
     private static int Main(string[] args)
     {
         if (args.Length > 0 && (args[0] is "--help" or "-h" or "/?"))
         {
-            Console.WriteLine("HarnessCli — консольный ReAct-агент (Terminal.Gui).");
+            Console.WriteLine("HarnessCli — консольный ReAct-агент (SharpConsoleUI).");
             Console.WriteLine("Использование: HarnessCli [рабочая-папка]");
             Console.WriteLine("Без аргумента берётся последняя использованная папка, иначе спрашивается.");
-            Console.WriteLine("  --selfcheck   проверить рендеринг Markdown и показать цветовую схему");
             return 0;
         }
 
-        if (args.Length > 0 && args[0] == "--selfcheck")
-        {
-            Console.OutputEncoding = System.Text.Encoding.UTF8;
-            return RenderSelfCheck.Run();
-        }
-
         // Rolling file log in logs\ next to the exe; every catch block reports here.
-        // The console itself belongs to Terminal.Gui, so nothing is written to stdout.
+        // The console itself belongs to SharpConsoleUI, so nothing is written to stdout.
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Debug()
             .WriteTo.File(
@@ -43,27 +39,25 @@ internal static class Program
         {
             Log.Information("Application starting");
 
-            using IApplication app = Application.Create().Init();
-            Theme.Register();
+            // The app draws its own menu and status bar inside the window, so the window
+            // system's built-in top/bottom desktop panels would only double them up.
+            var windowSystem = new ConsoleWindowSystem(
+                new NetConsoleDriver(RenderMode.Buffer),
+                options: new ConsoleWindowSystemOptions(
+                    ShowTopPanel: false,
+                    ShowBottomPanel: false));
 
-            string? folder = ResolveWorkingFolder(app, args);
-            if (folder is null)
+            Console.CancelKeyPress += (_, e) =>
             {
-                return 1; // The working folder is mandatory — without it the agent has nothing to operate on.
-            }
+                e.Cancel = true;
+                windowSystem.Shutdown(0);
+            };
 
-            var window = new MainWindow(app, folder);
-            try
-            {
-                app.Run(window);
-                window.DisposeHostsAsync().AsTask().GetAwaiter().GetResult();
-            }
-            finally
-            {
-                window.Dispose();
-            }
+            var window = new MainWindow(windowSystem, ResolveWorkingFolder(args));
+            int exitCode = windowSystem.Run();
+            window.DisposeHostsAsync().AsTask().GetAwaiter().GetResult();
 
-            return 0;
+            return exitCode;
         }
         catch (Exception ex)
         {
@@ -77,7 +71,11 @@ internal static class Program
         }
     }
 
-    private static string? ResolveWorkingFolder(IApplication app, string[] args)
+    /// <summary>
+    /// Working folder from the command line or the saved settings, or <see langword="null"/>
+    /// when neither resolves — the window then asks for one.
+    /// </summary>
+    private static string? ResolveWorkingFolder(string[] args)
     {
         if (args.Length > 0 && Directory.Exists(args[0]))
         {
@@ -85,14 +83,6 @@ internal static class Program
         }
 
         string? saved = AppSettings.LoadLastWorkingFolder();
-        if (saved is not null && Directory.Exists(saved))
-        {
-            return saved;
-        }
-
-        return Dialogs.PickFolder(
-            app,
-            "Выберите рабочую папку агента (file_access, поиск и команды будут работать в ней)",
-            saved);
+        return saved is not null && Directory.Exists(saved) ? saved : null;
     }
 }

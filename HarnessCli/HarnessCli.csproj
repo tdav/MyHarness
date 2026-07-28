@@ -9,13 +9,33 @@
     <Nullable>enable</Nullable>
     <!-- Harness providers and samples use experimental APIs. -->
     <NoWarn>$(NoWarn);OPENAI001;MAAI001</NoWarn>
-    <!-- Terminal.Gui drives the console itself; the app must not be a Windows subsystem app. -->
+    <!-- SharpConsoleUI drives the console itself; the app must not be a Windows subsystem app. -->
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 
+  <!-- NativeAOT. `dotnet publish -r win-x64` produces a single native exe; a plain
+       `dotnet build` stays on the JIT, so day-to-day development is unaffected.
+       The native link step needs the MSVC toolchain: publish from a Developer
+       Command Prompt, or put the VS Installer folder (vswhere.exe) on PATH. -->
+  <PropertyGroup>
+    <PublishAot>true</PublishAot>
+    <InvariantTimezone>false</InvariantTimezone>
+
+    <!-- The agent stack (Microsoft.Agents.AI, OpenAI, OllamaSharp) serializes hundreds of
+         protocol types through System.Text.Json's reflection resolver; source-generating
+         contexts for third-party models is not possible from here. Keeping the reflection
+         resolver alive is what makes those libraries work under AOT — trimming is therefore
+         restricted to whole unused assemblies so no member of a live type is removed. -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <TrimMode>partial</TrimMode>
+
+    <!-- Trim/AOT warnings from the dependency graph are reported but not fatal: the
+         reflection paths they flag are covered by the two settings above. -->
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+  </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="Markdig" Version="1.3.2" />
-    <PackageReference Include="Terminal.Gui" Version="2.4.17" />
+    <PackageReference Include="SharpConsoleUI" Version="2.5.14" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
     <PackageReference Include="Microsoft.Agents.AI" Version="1.15.0" />
     <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="1.15.0" />
